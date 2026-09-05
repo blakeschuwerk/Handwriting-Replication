@@ -1,0 +1,42 @@
+# --- secrets ---
+.env
+*.pat
+*_token*
+
+# --- python ---
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# --- personal data: photos of real handwritten notes, real name visible ---
+# This repo is PUBLIC. None of this should ever be committed.
+raw_scans/
+pages/
+segmented/
+boxes/
+labels.csv
+labels_auto.csv
+labels_review.csv
+dataset/*.h5
+page_rotation.json
+
+# --- model weights & checkpoints: 141MB-405MB each, GitHub hard-caps at 100MB ---
+checkpoints/*.pth
+models/weights/*.pth
+models/weights/.cache/
+models/FW_GAN/data/*.hdf5
+
+# --- third-party model code: has its own repo + MIT license, don't vendor it ---
+models/FW_GAN/
+
+# --- generated output, not source ---
+output/
+samples/
+train_log.txt
+scratchpad_finetune_run.log
+orchestration_state.json
+
+# --- archive: contains a photo with real name visible; keep out of public repo ---
+_archive/
+*.log

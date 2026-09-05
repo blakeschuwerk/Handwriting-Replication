@@ -1,0 +1,939 @@
+"""
+Handwriting Synthesis — local dashboard backend.
+
+A tiny single-user FastAPI server that wraps the existing pipeline scripts
+(segment.py, package_dataset.py, finetune.py, generate.py, render_page.py) so the
+whole workflow can be driven from a browser UI instead of the terminal.
+
+Design notes:
+  * The heavy lifting stays in the pinned scripts under scripts/. This server only
+    uploads files, writes labels.csv, launches those scripts as subprocesses, and
+    streams their logs back to the page. No ML logic lives here.
+  * Everything runs against the project's own venv python (sys.executable, because
+    this server is started BY that venv python) with PYTORCH_ENABLE_MPS_FALLBACK=1
+    and cwd = project root, exactly like the reviewer-verified manual invocations.
+  * Long-running training is a detached-ish subprocess writing to train_log.txt
+    (the script already does this); the UI tails that file + polls samples/.
+"""
+
+import csv
+import io
+import json
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    StreamingResponse,
+    FileResponse,
+    PlainTextResponse,
+)
+
+# ----------------------------------------------------------------------------
+# Paths
+# ----------------------------------------------------------------------------
+PROJECT = Path("/Users/blakey5aces/Handwriting Analysis")
+SCRIPTS = PROJECT / "scripts"
+RAW = PROJECT / "raw_scans"
+SEGMENTED = PROJECT / "segmented"
+DATASET = PROJECT / "dataset"
+CHECKPOINTS = PROJECT / "checkpoints"
+SAMPLES = PROJECT / "samples"
+OUTPUT = PROJECT / "output"
+WEIGHTS = PROJECT / "models" / "weights" / "FW-GAN.pth"
+LABELS = PROJECT / "labels.csv"
+MANIFEST = SEGMENTED / "manifest.csv"
+TRAIN_LOG = PROJECT / "train_log.txt"
+DASHBOARD_DIR = PROJECT / "dashboard"
+STATIC_INDEX = DASHBOARD_DIR / "index.html"
+
+PAGES = PROJECT / "pages"
+BOXES = PROJECT / "boxes"
+ROTATION_JSON = PROJECT / "page_rotation.json"
+
+IMG_EXTS = {".png", ".jpg", ".jpeg", ".heic", ".webp", ".bmp", ".tif", ".tiff"}
+
+for d in (RAW, SEGMENTED, DATASET, CHECKPOINTS, SAMPLES, OUTPUT, PAGES, BOXES):
+    d.mkdir(parents=True, exist_ok=True)
+
+# Pipeline modules are imported directly (not shelled out to) where the server
+# only needs a pure helper -- dictionary lookup, box geometry -- so a filter
+# request doesn't pay subprocess startup.
+sys.path.insert(0, str(SCRIPTS))
+import boxstore as _boxstore  # noqa: E402
+import curate_labels as _curate  # noqa: E402
+import wordcheck as _wordcheck  # noqa: E402
+
+_VOCAB = None
+_LEX = None
+
+
+def _lex():
+    """Spell/plausibility judge, built once (it reads the whole manifest)."""
+    global _LEX
+    if _LEX is None:
+        _LEX = _wordcheck.Lexicon.build(str(PROJECT))
+    return _LEX
+
+# ----------------------------------------------------------------------------
+# Subprocess helpers
+# ----------------------------------------------------------------------------
+PY = sys.executable  # the venv python that launched this server
+
+
+def _env():
+    e = os.environ.copy()
+    e["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+    # Scripts self-insert models/FW_GAN, but set it too for belt-and-suspenders.
+    fw = str(PROJECT / "models" / "FW_GAN")
+    e["PYTHONPATH"] = fw + (os.pathsep + e["PYTHONPATH"] if e.get("PYTHONPATH") else "")
+    return e
+
+
+def stream_script(args):
+    """Run `python scripts/<...>` and yield combined stdout/stderr lines as SSE."""
+    cmd = [PY] + args
+    yield _sse(f"$ {' '.join(shlex.quote(c) for c in cmd)}\n")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(PROJECT),
+            env=_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        yield _sse(f"[launch error] {exc}\n")
+        yield _sse("__DONE__ 1")
+        return
+    for line in iter(proc.stdout.readline, ""):
+        yield _sse(line.rstrip("\n"))
+    proc.stdout.close()
+    rc = proc.wait()
+    yield _sse(f"__DONE__ {rc}")
+
+
+def _sse(data: str) -> str:
+    # Server-Sent Events: one "data:" per line; blank line terminates the event.
+    return "data: " + data.replace("\r", "") + "\n\n"
+
+
+# ----------------------------------------------------------------------------
+# App
+# ----------------------------------------------------------------------------
+app = FastAPI(title="Handwriting Synthesis Dashboard")
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    if STATIC_INDEX.is_file():
+        return STATIC_INDEX.read_text(encoding="utf-8")
+    return HTMLResponse("<h1>index.html missing</h1>", status_code=500)
+
+
+# ---- image serving ---------------------------------------------------------
+def _safe_under(base: Path, name: str) -> Path:
+    p = (base / name).resolve()
+    if base.resolve() not in p.parents and p != base.resolve():
+        raise HTTPException(400, "path escapes base directory")
+    if not p.is_file():
+        raise HTTPException(404, "not found")
+    return p
+
+
+@app.get("/img/raw/{name}")
+def img_raw(name: str):
+    return FileResponse(_safe_under(RAW, name))
+
+
+@app.get("/img/segmented/{name}")
+def img_segmented(name: str):
+    return FileResponse(_safe_under(SEGMENTED, name))
+
+
+@app.get("/img/segmented/debug/{name}")
+def img_segmented_debug(name: str):
+    return FileResponse(_safe_under(SEGMENTED / "debug", name))
+
+
+@app.get("/img/samples/{name}")
+def img_samples(name: str):
+    return FileResponse(_safe_under(SAMPLES, name))
+
+
+@app.get("/img/output/{name}")
+def img_output(name: str):
+    return FileResponse(_safe_under(OUTPUT, name))
+
+
+@app.get("/file/output/{name}")
+def file_output(name: str):
+    p = _safe_under(OUTPUT, name)
+    return FileResponse(p, filename=name)
+
+
+# ---- status ----------------------------------------------------------------
+@app.get("/api/status")
+def status():
+    raw = sorted(p.name for p in RAW.iterdir() if p.suffix.lower() in IMG_EXTS) if RAW.exists() else []
+    crops = sorted(p.name for p in SEGMENTED.glob("*.png")) if SEGMENTED.exists() else []
+    n_labeled = 0
+    if LABELS.is_file():
+        with LABELS.open(newline="", encoding="utf-8") as f:
+            n_labeled = sum(1 for r in csv.DictReader(f) if r.get("text", "").strip())
+    ckpts = sorted(p.name for p in CHECKPOINTS.glob("*.pth")) if CHECKPOINTS.exists() else []
+    samples = sorted(p.name for p in SAMPLES.glob("*.png")) if SAMPLES.exists() else []
+    return {
+        "raw_scans": raw,
+        "n_raw": len(raw),
+        "n_crops": len(crops),
+        "n_labeled": n_labeled,
+        "dataset_exists": (DATASET / "dataset.h5").is_file(),
+        "checkpoints": ckpts,
+        "has_finetuned": (CHECKPOINTS / "latest.pth").is_file(),
+        "n_samples": len(samples),
+        "training": _train.running(),
+        "pretrained_exists": WEIGHTS.is_file(),
+    }
+
+
+# ---- upload ----------------------------------------------------------------
+@app.post("/api/upload")
+async def upload(files: list[UploadFile] = File(...)):
+    saved, rejected = [], []
+    for f in files:
+        ext = Path(f.filename).suffix.lower()
+        if ext not in IMG_EXTS:
+            rejected.append(f.filename)
+            continue
+        dest = RAW / Path(f.filename).name
+        data = await f.read()
+        dest.write_bytes(data)
+        saved.append(dest.name)
+    return {"saved": saved, "rejected": rejected}
+
+
+@app.post("/api/delete_raw")
+def delete_raw(name: str = Form(...)):
+    p = _safe_under(RAW, name)
+    p.unlink()
+    return {"deleted": name}
+
+
+# ---- segment ---------------------------------------------------------------
+@app.get("/api/segment")
+def segment(granularity: str = "word"):
+    gran = granularity if granularity in ("word", "line") else "word"
+    return StreamingResponse(
+        stream_script([str(SCRIPTS / "segment.py"), "--granularity", gran]),
+        media_type="text/event-stream",
+    )
+
+
+def _vocab():
+    """Dictionary used for the label-plausibility flag, loaded once."""
+    global _VOCAB
+    if _VOCAB is None:
+        _VOCAB = _curate.load_dictionary()
+    return _VOCAB
+
+
+def _read_manifest():
+    if not MANIFEST.is_file():
+        return []
+    with MANIFEST.open(newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def _flag_reason(text, conf, min_conf):
+    """(why this label needs human eyes, what it probably should say).
+
+    Confidence alone is a weak test -- Vision reports 1.00 for plenty of wrong
+    readings ("value"->"valve") -- so spelling plausibility carries most of the
+    weight and confidence is a second, independent input.
+    """
+    flag, sug, _src = _wordcheck.judge(text, _lex())
+    if flag:
+        return flag, sug
+    if conf < min_conf:
+        return "low_conf", None
+    return None, None
+
+
+@app.get("/api/crops")
+def crops(filter: str = "all", min_conf: float = 0.5,
+          offset: int = 0, limit: int = 200):
+    """Crops + labels, filterable and paginated.
+
+    Paginated because the page previously rendered every crop at once; at ~3k
+    crops that is thousands of DOM nodes and image requests in one shot, which
+    is what made the Label tab crawl.
+    """
+    labels = {}
+    if LABELS.is_file():
+        with LABELS.open(newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                labels[os.path.basename(r["image_path"])] = r.get("text", "")
+
+    # Boxes a human signed off on must not be re-flagged here either, or the
+    # overview contradicts the page you accepted them on.
+    ok_ids = set()
+    for sp in (sorted(RAW.iterdir()) if RAW.exists() else []):
+        if sp.suffix.lower() not in IMG_EXTS:
+            continue
+        for b in _boxstore.active(_boxstore.load(str(PROJECT), sp.name) or {}):
+            if b.get("accepted"):
+                ok_ids.add(b["id"])
+
+    rows = []
+    for r in _read_manifest():
+        name = os.path.basename(r["crop_path"])
+        if not (SEGMENTED / name).is_file():
+            continue
+        auto = r.get("auto_text", "")
+        # A label counts as present only once CURATED into labels.csv. The raw
+        # Vision guess stays separate as `auto` (offered as a suggestion), so
+        # "unlabeled" means "nothing trustworthy committed yet" rather than
+        # "the detector had no opinion" -- which is the set worth reviewing.
+        text = labels.get(name, "")
+        try:
+            conf = float(r.get("line_conf") or 0)
+        except ValueError:
+            conf = 0.0
+        if r.get("box_id") in ok_ids:
+            reason, suggest = None, None
+        else:
+            reason, suggest = _flag_reason(text or auto, conf, min_conf)
+        rows.append({
+            "name": name, "text": text, "auto": auto, "conf": round(conf, 3),
+            "flag": reason, "suggest": suggest,
+            "scan": os.path.basename(r.get("source_scan", "")),
+            "key": _boxstore.page_key(r.get("source_scan", "")),
+            "box_id": r.get("box_id", ""), "edited": r.get("edited") == "1",
+        })
+
+    if filter == "unlabeled":
+        rows = [r for r in rows if not r["text"].strip()]
+    elif filter == "flagged":
+        rows = [r for r in rows if r["flag"]]
+    elif filter == "edited":
+        rows = [r for r in rows if r["edited"]]
+
+    total = len(rows)
+    counts = {
+        "all": total,
+        "flagged": sum(1 for r in rows if r["flag"]),
+    }
+    return {"crops": rows[offset:offset + limit], "total": total,
+            "offset": offset, "limit": limit, "counts": counts}
+
+
+# ---- page / box editing ----------------------------------------------------
+_FLAG_CACHE = {}
+_LEX_GEN = 0
+
+
+_MANIFEST_IDS = {"stamp": None, "ids": set()}
+
+
+def _manifest_ids():
+    """Box ids that actually produced a crop file.
+
+    A box can exist in the box store yet never reach the dataset -- build_page
+    skips anything below its minimum width/height. Counting those would make
+    the running word total on the Build Dataset tab disagree with the number of
+    pairs the build actually writes, which is the one number that tab exists to
+    get right.
+    """
+    stamp = MANIFEST.stat().st_mtime_ns if MANIFEST.is_file() else 0
+    if _MANIFEST_IDS["stamp"] != stamp:
+        ids = set()
+        for r in _read_manifest():
+            if r.get("box_id"):
+                ids.add(r["box_id"])
+        _MANIFEST_IDS.update(stamp=stamp, ids=ids)
+    return _MANIFEST_IDS["ids"]
+
+
+def _page_review(scan_name, key, doc):
+    """(flagged, trainable, characters) for one page.
+
+    `trainable` is the number of boxes that would actually reach labels.csv --
+    it applies the same rule build_labels.py does, so the count shown next to a
+    page is the count that page contributes, not just its box total.
+    `characters` is the alphabet those words cover, which matters more than raw
+    volume: the model cannot learn to draw a letter it has never been shown.
+
+    Cached per page: recomputing means decoding the page image and running
+    connected components over every box (~0.7s for the whole set), and the page
+    picker asks for all of them at once. Keyed on the box file's mtime and the
+    lexicon generation, so an edit or a re-detect recomputes and nothing else
+    does.
+    """
+    if not doc:
+        return 0, 0, ""
+    bp = Path(_boxstore.path_for(str(PROJECT), scan_name))
+    stamp = bp.stat().st_mtime_ns if bp.is_file() else 0
+    hit = _FLAG_CACHE.get(key)
+    if hit and hit[0] == stamp and hit[1] == _LEX_GEN:
+        return hit[2], hit[3], hit[4]
+    lex, gray, cropped = _lex(), _page_gray(key), _manifest_ids()
+    flagged = trainable = 0
+    chars = set()
+    for b in _boxstore.active(doc):
+        text = (b.get("text") or "").strip()
+        if b.get("accepted"):
+            flag = None
+        else:
+            flag, _s, _src = _wordcheck.judge(text, lex, _ink(gray, b))
+        if flag:
+            flagged += 1
+        elif text and b["id"] in cropped:
+            trainable += 1
+            chars.update(text)
+    joined = "".join(sorted(chars))
+    _FLAG_CACHE[key] = (stamp, _LEX_GEN, flagged, trainable, joined)
+    return flagged, trainable, joined
+
+
+@app.get("/api/pages")
+def list_pages():
+    """Scans with their box counts, for the page picker in the editor."""
+    out = []
+    for p in sorted(RAW.iterdir()) if RAW.exists() else []:
+        if p.suffix.lower() not in IMG_EXTS:
+            continue
+        doc = _boxstore.load(str(PROJECT), p.name)
+        key = _boxstore.page_key(p.name)
+        flagged, trainable, chars = _page_review(p.name, key, doc)
+        out.append({
+            "scan": p.name,
+            "key": key,
+            "boxes": len(_boxstore.active(doc)) if doc else 0,
+            # The picker showed only a green box count, which reads as "this
+            # page is done" -- on a page where a third of the boxes are wrong.
+            "flagged": flagged,
+            "trainable": trainable,
+            "chars": chars,
+            "rotation": (doc or {}).get("rotation", 0),
+            "ready": (PAGES / f"{key}.png").is_file(),
+        })
+    return {"pages": out}
+
+
+@app.get("/page_img/{key}")
+def page_img(key: str):
+    return FileResponse(_safe_under(PAGES, key + ".png"))
+
+
+@app.get("/api/checkword")
+def checkword(text: str = ""):
+    """Judge free-typed text against the document vocabulary, live.
+
+    The browser's own spellcheck (turned on via the `spellcheck` attribute on
+    the inputs) already underlines ordinary typos as you type -- that needs no
+    endpoint. This exists for the words it gets backwards: "operations",
+    "forecast", the domain jargon in these notes, which a generic dictionary
+    flags as wrong but which is exactly right here. No ink check (there is no
+    box yet, just typed text).
+    """
+    flag, sug, _src = _wordcheck.judge(text, _lex())
+    return {"flag": flag, "suggest": sug}
+
+
+_PAGE_CACHE = {}
+
+
+def _page_gray(key):
+    """The processed page image the editor overlays boxes on, cached by mtime."""
+    import cv2
+    p = PAGES / f"{key}.png"
+    if not p.is_file():
+        return None
+    stamp = p.stat().st_mtime_ns
+    hit = _PAGE_CACHE.get(key)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+    _PAGE_CACHE[key] = (stamp, img)
+    return img
+
+
+def _ink(gray, b):
+    """Fraction of a box covered by letter-shaped ink.
+
+    Plain dark-pixel counting does not work here: the pages are ruled, and the
+    scan carries the shadow of a spiral binding, so blank paper is not white.
+    Binarising and then discarding components that are too short to be a letter
+    or too long-and-flat to be anything but a rule removes most of that.
+
+    It is still only a weak signal on a page this dense -- an empty box in the
+    gutter between two lines can score as high as a legitimately sparse crop --
+    so it flags the clear-cut cases only. The crop preview in the editor is what
+    actually proves a box contains what you think it does.
+    """
+    import cv2
+    if gray is None:
+        return None
+    y0, x0 = max(0, int(b["y"])), max(0, int(b["x"]))
+    r = gray[y0:y0 + int(b["h"]), x0:x0 + int(b["w"])]
+    if r.size < 100:
+        return 0.0
+    bw = cv2.adaptiveThreshold(r, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                               cv2.THRESH_BINARY_INV, 31, 12)
+    n, _, st, _ = cv2.connectedComponentsWithStats(bw, 8)
+    H = r.shape[0]
+    keep = 0
+    for i in range(1, n):
+        _, _, w, h, a = st[i]
+        if h < max(3, 0.14 * H) or a < 12:
+            continue
+        if w > 6 * h and h < 0.30 * H:          # a ruled line, not a letter
+            continue
+        keep += a
+    return round(keep / float(r.size), 4)
+
+
+@app.get("/img/box/{key}/{box_id}")
+def img_box(key: str, box_id: str, x: int = -1, y: int = -1, w: int = 0, h: int = 0):
+    """One box as a picture: the region, outlined, with a little context around it.
+
+    Geometry can be passed explicitly, and the editor always does. That matters:
+    a box the user has dragged but not yet saved is still at its old coordinates
+    on disk, so looking the box up would draw the wrong region -- exactly the
+    case (a box moved off its word) this preview exists to make visible.
+    """
+    import cv2
+    box_id = box_id[:-4] if box_id.endswith(".png") else box_id
+    gray = _page_gray(key)
+    if gray is None:
+        raise HTTPException(404, "page not built")
+
+    box = None
+    if x >= 0 and y >= 0 and w > 0 and h > 0:
+        box = {"x": x, "y": y, "w": w, "h": h}
+    else:
+        for p in RAW.iterdir():
+            if _boxstore.page_key(p.name) != key:
+                continue
+            for b in _boxstore.active(_boxstore.load(str(PROJECT), p.name) or {}):
+                if b["id"] == box_id:
+                    box = b
+                    break
+    if box is None:
+        raise HTTPException(404, "unknown box")
+
+    H, W = gray.shape[:2]
+    # Wide but shallow context: enough of the neighbouring words to judge the
+    # reading, without so much vertical padding that the word itself becomes an
+    # unreadable sliver once the thumbnail is scaled to fit.
+    px, py = max(12, int(0.60 * box["h"])), max(4, int(0.16 * box["h"]))
+    x0, y0 = max(0, box["x"] - px), max(0, box["y"] - py)
+    x1, y1 = min(W, box["x"] + box["w"] + px), min(H, box["y"] + box["h"] + py)
+    if x1 <= x0 or y1 <= y0:
+        raise HTTPException(404, "box outside the page")
+    crop = cv2.cvtColor(gray[y0:y1, x0:x1], cv2.COLOR_GRAY2BGR)
+    cv2.rectangle(crop, (box["x"] - x0, box["y"] - y0),
+                  (box["x"] + box["w"] - x0, box["y"] + box["h"] - y0),
+                  (60, 60, 220), 2)
+    ok, buf = cv2.imencode(".png", crop)
+    if not ok:
+        raise HTTPException(500, "encode failed")
+    return Response(content=buf.tobytes(), media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/page/{key}/boxes")
+def get_boxes(key: str):
+    for p in RAW.iterdir():
+        if _boxstore.page_key(p.name) == key:
+            doc = _boxstore.load(str(PROJECT), p.name)
+            if not doc:
+                raise HTTPException(404, "no boxes yet — run detect first")
+            boxes = _boxstore.active(doc)
+            lex, gray = _lex(), _page_gray(key)
+            for b in boxes:
+                ink = _ink(gray, b)
+                if b.get("accepted"):
+                    # Human said this really is what the page says (these notes
+                    # contain genuine misspellings). Stop second-guessing it.
+                    flag = sug = src = None
+                else:
+                    flag, sug, src = _wordcheck.judge(b.get("text", ""), lex, ink)
+                b["ink"] = ink
+                b["flag"] = flag
+                b["suggest"] = sug
+                b["sug_src"] = src
+            doc["boxes"] = boxes
+            doc["flagged"] = sum(1 for b in boxes if b["flag"])
+            return doc
+    raise HTTPException(404, "unknown page")
+
+
+@app.put("/api/page/{key}/boxes")
+async def put_boxes(key: str, payload: dict):
+    """Persist edited boxes.
+
+    Anything arriving here has been through the editor, so each box is marked
+    edited unless it is byte-identical to what detection produced. That flag is
+    what protects it from being overwritten by the next detect pass.
+    """
+    for p in RAW.iterdir():
+        if _boxstore.page_key(p.name) != key:
+            continue
+        doc = _boxstore.load(str(PROJECT), p.name)
+        if not doc:
+            raise HTTPException(404, "no boxes yet")
+        prior = {b["id"]: b for b in doc.get("boxes", [])}
+        incoming = payload.get("boxes", [])
+        merged = []
+        seen = set()
+        for b in incoming:
+            bid = b.get("id") or _boxstore.new_id()
+            seen.add(bid)
+            old = prior.get(bid)
+            moved = (not old) or any(
+                int(b.get(k, 0)) != int(old.get(k, 0)) for k in ("x", "y", "w", "h")
+            ) or (b.get("text", "") != old.get("text", ""))
+            rec = dict(old or _boxstore.make_box(0, 0, 0, 0))
+            rec.update({
+                "id": bid,
+                "x": int(b.get("x", 0)), "y": int(b.get("y", 0)),
+                "w": int(b.get("w", 0)), "h": int(b.get("h", 0)),
+                "text": b.get("text", rec.get("text", "")),
+                "source": b.get("source", rec.get("source", "manual")),
+                "accepted": bool(b.get("accepted", rec.get("accepted", False))),
+                "deleted": False,
+            })
+            if moved:
+                rec["edited"] = True
+            merged.append(rec)
+        # boxes the editor dropped are soft-deleted, never lost
+        for bid, old in prior.items():
+            if bid not in seen:
+                old["deleted"] = True
+                merged.append(old)
+        doc["boxes"] = merged
+        _boxstore.assign_reading_order(doc)
+        _boxstore.save(str(PROJECT), p.name, doc)
+        return {"saved": len([b for b in merged if not b.get("deleted")]),
+                "deleted": len([b for b in merged if b.get("deleted")])}
+    raise HTTPException(404, "unknown page")
+
+
+@app.post("/api/page/{key}/rotate")
+def rotate_page(key: str, payload: dict):
+    """Record a page's rotation. Vision reads upside-down text fine, so this
+    cannot be auto-detected — see boxstore/vision_segment notes."""
+    deg = int(payload.get("degrees", 180)) % 360
+    rot = {}
+    if ROTATION_JSON.is_file():
+        rot = json.loads(ROTATION_JSON.read_text())
+    for p in RAW.iterdir():
+        if _boxstore.page_key(p.name) == key:
+            if deg:
+                rot[p.name] = deg
+            else:
+                rot.pop(p.name, None)
+            ROTATION_JSON.write_text(json.dumps(rot, indent=2, ensure_ascii=False))
+            return {"scan": p.name, "degrees": deg}
+    raise HTTPException(404, "unknown page")
+
+
+def _invalidate():
+    """The document vocabulary is derived from the manifest, so any pass that
+    rewrites the manifest also invalidates the judge and the page cache."""
+    global _LEX, _LEX_GEN
+    _LEX = None
+    _LEX_GEN += 1          # retires every cached per-page flag count
+    _PAGE_CACHE.clear()
+
+
+@app.get("/api/detect")
+def detect(only: str = ""):
+    _invalidate()
+    args = [str(SCRIPTS / "detect_and_build.py"), "all"]
+    if only:
+        args += ["--only", only]
+    return StreamingResponse(stream_script(args), media_type="text/event-stream")
+
+
+@app.get("/api/rebuild")
+def rebuild():
+    """Regenerate crops from the (possibly edited) box store."""
+    _invalidate()
+    return StreamingResponse(
+        stream_script([str(SCRIPTS / "detect_and_build.py"), "build"]),
+        media_type="text/event-stream")
+
+
+@app.get("/api/buildlabels")
+def buildlabels(pages: str = ""):
+    """Box store -> labels.csv, honouring human overrides (see build_labels.py).
+
+    `pages` is an optional comma-separated list of page keys, so the Build
+    Dataset tab can train on a chosen subset rather than everything on disk.
+    """
+    _invalidate()
+    args = [str(SCRIPTS / "build_labels.py")]
+    if pages:
+        args += ["--pages", pages]
+    return StreamingResponse(stream_script(args), media_type="text/event-stream")
+
+
+@app.get("/api/curate")
+def curate(min_conf: float = 0.3):
+    return StreamingResponse(
+        stream_script([str(SCRIPTS / "curate_labels.py"), "--min-conf", str(min_conf)]),
+        media_type="text/event-stream")
+
+
+@app.post("/api/labels")
+async def save_labels(payload: dict):
+    """payload = {"labels": {crop_name: text, ...}}  -> MERGES into labels.csv.
+
+    Merge, not overwrite. The Label tab paginates at 200 crops, and it posts
+    the inputs currently on screen -- so a rewrite-from-scratch silently
+    deleted every label not on the visible page (it took labels.csv from 1912
+    rows down to 200 exactly once before this was caught). Only the keys
+    actually sent are touched.
+    """
+    items = payload.get("labels", {})
+    rows = {}
+    if LABELS.is_file():
+        with LABELS.open(newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                rows[os.path.basename(r["image_path"])] = r.get("text", "")
+    before = len(rows)
+    rows.update({os.path.basename(k): v for k, v in items.items()})
+
+    tmp = LABELS.with_suffix(".csv.tmp")
+    with tmp.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["image_path", "text", "writer_id"])
+        for name, text in sorted(rows.items()):
+            w.writerow([str(SEGMENTED / name), text, "me"])
+    os.replace(tmp, LABELS)
+    return {"written": len(rows), "submitted": len(items), "was": before,
+            "non_empty": sum(1 for v in rows.values() if str(v).strip())}
+
+
+@app.get("/api/dataset_info")
+def dataset_info():
+    """Read the built dataset back and report what is actually in it.
+
+    Deliberately reads dataset.h5 rather than echoing what the builder claimed:
+    the point of the confirmation panel is to tell you what landed on disk, so
+    it has to come from the file, not from the numbers the UI predicted.
+    """
+    f = DATASET / "dataset.h5"
+    if not f.is_file():
+        return {"exists": False}
+    import h5py
+    with h5py.File(f, "r") as h:
+        n = int(len(h["wids"]))
+        height = int(h["imgs"].shape[0])
+        px = int(h["imgs"].shape[1])
+        chars = sorted({chr(c) for c in h["lbs"][:]})
+        avg_len = float(h["lb_lens"][:].mean()) if n else 0.0
+    words = []
+    if LABELS.is_file():
+        with LABELS.open(newline="", encoding="utf-8") as fh:
+            words = [r["text"] for r in csv.DictReader(fh) if r.get("text", "").strip()]
+    # Which requested labels the packager cannot represent. It validates every
+    # crop against the model's fixed 81-character alphabet, so a word containing
+    # anything else (an arrow, an equals sign) is dropped. Parsed straight out
+    # of the model's own alphabet.py so this can't drift from the real rule.
+    unsupported = {}
+    try:
+        alpha_src = (PROJECT / "models" / "FW_GAN" / "lib" / "alphabet.py").read_text(encoding="utf-8")
+        m = re.search(r"'all':\s*'((?:[^'\\]|\\.)*)'", alpha_src)
+        allowed = set(m.group(1).encode().decode("unicode_escape")) if m else None
+    except Exception:
+        allowed = None
+    if allowed:
+        for w in words:
+            for ch in w:
+                if ch not in allowed:
+                    unsupported[ch] = unsupported.get(ch, 0) + 1
+
+    # which pages are actually represented, derived from the label paths
+    pages = set()
+    label_names = set()
+    if LABELS.is_file():
+        with LABELS.open(newline="", encoding="utf-8") as fh:
+            label_names = {os.path.basename(r["image_path"]) for r in csv.DictReader(fh)}
+    for r in _read_manifest():
+        if os.path.basename(r["crop_path"]) in label_names:
+            pages.add(_boxstore.page_key(r.get("source_scan", "")))
+    return {
+        "exists": True,
+        "samples": n,
+        "pages": len(pages),
+        "unique_words": len(set(w.lower() for w in words)),
+        # labels.csv is what we asked for; `samples` is what survived the
+        # packager's image validation. A gap means crops it refused.
+        "requested": len(words),
+        "unsupported": sorted(unsupported.items(), key=lambda kv: -kv[1]),
+        "chars": "".join(chars),
+        "n_chars": len(chars),
+        "avg_word_len": round(avg_len, 1),
+        "height": height,
+        "total_px": px,
+        "bytes": f.stat().st_size,
+        "built": int(f.stat().st_mtime),
+    }
+
+
+@app.get("/api/package")
+def package():
+    return StreamingResponse(
+        stream_script([str(SCRIPTS / "package_dataset.py")]),
+        media_type="text/event-stream",
+    )
+
+
+# ---- training --------------------------------------------------------------
+class TrainManager:
+    def __init__(self):
+        self.proc = None
+
+    def running(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def start(self, params):
+        if self.running():
+            raise HTTPException(409, "training already running")
+        args = [
+            PY,
+            str(SCRIPTS / "finetune.py"),
+            "--epochs", str(params.get("epochs", 40)),
+            "--batch-size", str(params.get("batch_size", 8)),
+            "--lr", str(params.get("lr", 1e-4)),
+            "--sample-every", str(params.get("sample_every", 25)),
+            "--ckpt-every", str(params.get("ckpt_every", 25)),
+            "--keep", str(params.get("keep", 3)),
+            "--sample-text", str(params.get("sample_text", "the quick brown fox")),
+        ]
+        if params.get("max_steps"):
+            args += ["--max-steps", str(params["max_steps"])]
+        if params.get("style_ref"):
+            args += ["--style-ref", str(SEGMENTED / params["style_ref"])]
+        if params.get("resume"):
+            args += ["--resume"]
+        # Truncate the log so the UI shows only this run.
+        TRAIN_LOG.write_text("", encoding="utf-8")
+        self.proc = subprocess.Popen(
+            args, cwd=str(PROJECT), env=_env(),
+            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+        )
+        return {"pid": self.proc.pid, "cmd": " ".join(shlex.quote(a) for a in args)}
+
+    def stop(self):
+        if not self.running():
+            return {"stopped": False, "reason": "not running"}
+        self.proc.send_signal(signal.SIGINT)
+        try:
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+        return {"stopped": True}
+
+
+_train = TrainManager()
+
+
+@app.post("/api/train/start")
+def train_start(params: dict):
+    if not (DATASET / "dataset.h5").is_file():
+        raise HTTPException(400, "dataset/dataset.h5 not found — build the dataset first")
+    return _train.start(params)
+
+
+@app.post("/api/train/stop")
+def train_stop():
+    return _train.stop()
+
+
+@app.get("/api/train/status")
+def train_status():
+    latest = None
+    latest_mtime = -1
+    if SAMPLES.exists():
+        for p in SAMPLES.glob("step_*.png"):
+            m = p.stat().st_mtime
+            if m > latest_mtime:
+                latest_mtime, latest = m, p.name
+    tail = ""
+    if TRAIN_LOG.is_file():
+        tail = TRAIN_LOG.read_text(encoding="utf-8", errors="replace")
+    return {
+        "running": _train.running(),
+        "latest_sample": latest,
+        "log": tail[-8000:],  # last chunk only
+    }
+
+
+# ---- generate --------------------------------------------------------------
+@app.get("/api/generate")
+def generate(text: str, style: str = "", ckpt: str = "pretrained"):
+    # Clear prior per-word PNGs so the gallery shows only this run's words.
+    for p in OUTPUT.glob("*.png"):
+        if p.name[:3].isdigit():
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    args = [str(SCRIPTS / "generate.py"), "--text", text, "--device", "mps"]
+    if style:
+        args += ["--style", str(SEGMENTED / style)]
+    if ckpt and ckpt != "pretrained":
+        args += ["--ckpt", str(CHECKPOINTS / ckpt)]
+    return StreamingResponse(stream_script(args), media_type="text/event-stream")
+
+
+@app.get("/api/output_words")
+def output_words():
+    """Individual generated word PNGs (exclude _line and page composites)."""
+    names = []
+    for p in sorted(OUTPUT.glob("*.png")):
+        if p.name.startswith("_") or p.name.startswith("page") or p.name.startswith("rev"):
+            continue
+        # keep NNN_word.png pattern
+        if p.name[:3].isdigit():
+            names.append(p.name)
+    return {"words": names, "line": (OUTPUT / "_line.png").is_file()}
+
+
+# ---- render ----------------------------------------------------------------
+@app.get("/api/render")
+def render(text: str, style: str = "", ckpt: str = "pretrained", fmt: str = "png"):
+    out_name = "dashboard_page." + ("pdf" if fmt == "pdf" else "png")
+    args = [
+        str(SCRIPTS / "render_page.py"),
+        "--text", text,
+        "--device", "mps",
+        "--output", str(OUTPUT / out_name),
+    ]
+    if style:
+        args += ["--style", str(SEGMENTED / style)]
+    if ckpt and ckpt != "pretrained":
+        args += ["--ckpt", str(CHECKPOINTS / ckpt)]
+    return StreamingResponse(stream_script(args), media_type="text/event-stream")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("HW_DASH_PORT", "8765"))
+    print(f"\n  Handwriting dashboard →  http://127.0.0.1:{port}\n")
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

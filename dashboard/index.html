@@ -1,0 +1,1367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Handwriting Studio</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1e222b; --line: #2a2f3a;
+    --txt: #e6e9ef; --muted: #9aa3b2; --accent: #7c9cff; --accent2: #5bd6a0;
+    --warn: #ffcf6b; --bad: #ff7b7b; --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--txt);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  header {
+    padding: 18px 24px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    position: sticky; top: 0; background: rgba(15,17,21,.92); backdrop-filter: blur(8px); z-index: 10;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  header h1 span { color: var(--accent); }
+  .pipe { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+  .chip {
+    font-size: 12px; padding: 4px 10px; border-radius: 999px;
+    background: var(--panel2); border: 1px solid var(--line); color: var(--muted);
+    display: flex; gap: 6px; align-items: center; white-space: nowrap;
+  }
+  .chip b { color: var(--txt); font-weight: 600; }
+  .chip.ok { border-color: #2c5a45; color: var(--accent2); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: var(--accent2); box-shadow: 0 0 8px var(--accent2); }
+
+  nav { display: flex; gap: 4px; padding: 12px 24px 0; flex-wrap: wrap; }
+  nav button {
+    background: none; border: none; color: var(--muted); padding: 10px 16px;
+    font-size: 14px; cursor: pointer; border-radius: 8px 8px 0 0; font-weight: 550;
+  }
+  nav button.active { color: var(--txt); background: var(--panel); border: 1px solid var(--line); border-bottom: none; }
+  main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+  .tab { display: none; }
+  .tab.active { display: block; animation: fade .2s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; margin-bottom: 18px; }
+  .card h2 { margin: 0 0 4px; font-size: 16px; }
+  .card p.sub { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
+
+  button.btn {
+    background: var(--accent); color: #0b0d12; border: none; padding: 10px 18px;
+    border-radius: 8px; font-weight: 650; cursor: pointer; font-size: 14px;
+  }
+  button.btn:hover { filter: brightness(1.08); }
+  button.btn:disabled { opacity: .5; cursor: not-allowed; }
+  button.btn.ghost { background: var(--panel2); color: var(--txt); border: 1px solid var(--line); }
+  button.btn.danger { background: var(--bad); color: #240; }
+
+  label.fld { display: block; margin: 10px 0; }
+  label.fld span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  input[type=text], input[type=number], select, textarea {
+    width: 100%; background: var(--panel2); border: 1px solid var(--line); color: var(--txt);
+    padding: 9px 11px; border-radius: 8px; font-size: 14px; font-family: inherit;
+  }
+  textarea { resize: vertical; min-height: 64px; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; }
+  .row > * { flex: 1; min-width: 140px; }
+
+  #drop {
+    border: 2px dashed var(--line); border-radius: var(--radius); padding: 40px; text-align: center;
+    color: var(--muted); transition: .15s; cursor: pointer;
+  }
+  #drop.hot { border-color: var(--accent); color: var(--txt); background: var(--panel2); }
+
+  .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; margin-top: 14px; }
+  .thumb { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 6px; text-align: center; font-size: 11px; color: var(--muted); }
+  .thumb img { width: 100%; height: 70px; object-fit: contain; background: #fff; border-radius: 4px; }
+
+  .cropgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; margin-top: 14px; }
+  .cropcell { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+  .cropcell img { width: 100%; height: 46px; object-fit: contain; background: #fff; border-radius: 4px; margin-bottom: 6px; }
+  .cropcell input { padding: 6px 8px; font-size: 13px; }
+
+  pre.log {
+    background: #0a0c10; border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #c8d0dc;
+    max-height: 300px; overflow: auto; white-space: pre-wrap; margin-top: 14px;
+  }
+  .banner { background: #2a2410; border: 1px solid #5a4a1a; color: var(--warn); padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; }
+  .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px,1fr)); gap: 10px; margin-top: 14px; }
+  .gallery img { width: 100%; background: #fff; border-radius: 6px; border: 1px solid var(--line); }
+  .bigshot { margin-top: 14px; text-align: center; }
+  .bigshot img { max-width: 100%; background: #fff; border-radius: 8px; border: 1px solid var(--line); }
+  .muted { color: var(--muted); }
+  .flex { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  a.dl { color: var(--accent); text-decoration: none; }
+
+  /* ---- page picker ---- */
+  .pagegrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px,1fr)); gap: 12px; margin-top: 14px; }
+  .pagecard { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 8px; cursor: pointer; transition: .15s; }
+  .pagecard:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .pagecard img { width: 100%; height: 110px; object-fit: contain; background: #fff; border-radius: 6px; }
+  .pagecard .meta { font-size: 11px; color: var(--muted); margin-top: 6px; display: flex; justify-content: space-between; }
+  .pagecard .meta b { color: var(--accent2); }
+  /* a page with unreviewed boxes has to look unfinished, not just counted */
+  .pagecard { position: relative; }
+  .pagecard.needsfix { border-color: rgba(255,90,90,.55); }
+  .pagecard.needsfix:hover { border-color: var(--bad); }
+  .pagecard .fixbadge { position: absolute; top: 12px; right: 12px; background: rgba(200,40,40,.92); color: #fff; font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 999px; }
+  .pagecard .meta b.flagn, b.flagn { color: #ff6b6b; }
+  .cleanok { color: var(--accent2); }
+
+  /* ---- segmented filter bar ---- */
+  .segbar { display: inline-flex; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .segbar button { background: none; border: none; color: var(--muted); padding: 8px 14px; cursor: pointer; font-size: 13px; font-weight: 550; }
+  .segbar button.on { background: var(--accent); color: #0b0d12; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+
+  .cropcell.flagged { border-color: #6a4a1a; }
+  .cropcell .badge { font-size: 10px; color: var(--warn); float: right; }
+  .cropcell .ghost { font-size: 10px; color: var(--muted); margin-bottom: 4px; min-height: 12px; }
+  .cropcell { cursor: pointer; }
+  .cropcell:hover { border-color: var(--accent); }
+  .lbl-ro { font-size: 13px; padding: 5px 7px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+  .lbl-ro.none { color: var(--muted); font-style: italic; }
+  .lbl-sug { font-size: 11px; color: var(--accent2); margin-top: 4px; }
+  .pager { display: flex; gap: 8px; align-items: center; justify-content: center; margin-top: 16px; }
+
+  .minibtn { background: var(--panel2); border: 1px solid var(--line); color: var(--muted); font-size: 11px;
+             padding: 3px 9px; border-radius: 6px; cursor: pointer; margin-left: 6px; font-weight: 500; }
+  .minibtn:hover { border-color: var(--accent); color: var(--txt); }
+
+  /* ---- dataset build progress + completion ---- */
+  .buildprog { margin: 16px 0; }
+  .bstep { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); padding: 5px 0; }
+  .bstep i { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--line); flex: 0 0 16px; }
+  .bstep.run { color: var(--txt); }
+  .bstep.run i { border-color: var(--accent); border-top-color: transparent; animation: spin .7s linear infinite; }
+  .bstep.ok { color: var(--accent2); }
+  .bstep.ok i { border-color: var(--accent2); background: var(--accent2); position: relative; }
+  .bstep.ok i::after { content: '✓'; position: absolute; inset: 0; color: #0b0d12; font-size: 11px;
+                       display: flex; align-items: center; justify-content: center; font-weight: 800; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .builddone { margin: 18px 0; padding: 22px; text-align: center; border-radius: 12px;
+               background: linear-gradient(180deg, rgba(91,214,160,.10), rgba(91,214,160,.02));
+               border: 1px solid rgba(91,214,160,.45); animation: pop .45s cubic-bezier(.2,.9,.3,1.2); }
+  @keyframes pop { from { opacity: 0; transform: scale(.94) translateY(8px); } to { opacity: 1; transform: none; } }
+  .tickmark { width: 52px; height: 52px; }
+  .tickmark circle { fill: none; stroke: var(--accent2); stroke-width: 2; opacity: .35;
+                     stroke-dasharray: 151; stroke-dashoffset: 151; animation: draw .5s ease forwards; }
+  .tickmark path { fill: none; stroke: var(--accent2); stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round;
+                   stroke-dasharray: 40; stroke-dashoffset: 40; animation: draw .35s .35s ease forwards; }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  .bdtitle { font-size: 15px; font-weight: 650; margin-top: 6px; }
+  .bdcount { margin-top: 2px; }
+  .bdcount b { font-size: 40px; color: var(--accent2); font-variant-numeric: tabular-nums; }
+  .bdcount span { font-size: 13px; color: var(--muted); }
+  .bdgrid { display: flex; gap: 26px; justify-content: center; flex-wrap: wrap; margin-top: 14px;
+            padding-top: 14px; border-top: 1px solid var(--line); }
+  .bdgrid div span { display: block; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+  .bdgrid div b { font-size: 17px; font-variant-numeric: tabular-nums; }
+  .bdnote { font-size: 12px; color: var(--muted); margin-top: 12px; }
+  .bdnote .warn { color: var(--warn); }
+
+  /* ---- dataset builder ---- */
+  .dssum { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .dssum .big { display: flex; gap: 26px; flex-wrap: wrap; align-items: baseline; }
+  .dssum .big div span { display: block; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+  .dssum .big div b { font-size: 22px; font-variant-numeric: tabular-nums; }
+  .dssum .verdict { margin-top: 10px; font-size: 13px; padding-top: 10px; border-top: 1px solid var(--line); }
+  .dssum .verdict.good { color: var(--accent2); }
+  .dssum .verdict.ok { color: var(--warn); }
+  .dssum .verdict.low { color: var(--bad); }
+  .dssum .miss { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .dssum .miss code { background: var(--panel); padding: 1px 5px; border-radius: 4px; color: var(--warn); }
+  .dshead { font-size: 14px; margin: 22px 0 2px; }
+  .pagecard.pick { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .pagecard .tick { position: absolute; top: 12px; left: 12px; width: 20px; height: 20px; border-radius: 5px;
+                    background: rgba(0,0,0,.55); border: 1px solid var(--line); color: transparent; font-size: 13px;
+                    display: flex; align-items: center; justify-content: center; font-weight: 700; }
+  .pagecard.pick .tick { background: var(--accent); color: #0b0d12; border-color: var(--accent); }
+
+  /* ---- training controls ---- */
+  label.fld small { display: block; color: var(--muted); font-size: 11px; line-height: 1.4; margin: -6px 0 6px; }
+  .primer { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 16px; }
+  .primer summary { padding: 10px 14px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--accent); list-style: none; }
+  .primer summary::-webkit-details-marker { display: none; }
+  .primer summary::before { content: '▸ '; }
+  .primer[open] summary::before { content: '▾ '; }
+  .primerbody { padding: 0 16px 14px; font-size: 13px; line-height: 1.6; color: var(--txt); }
+  .primerbody code { background: var(--panel); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .primerbody ul { margin: 6px 0; padding-left: 20px; }
+  .primerbody li { margin-bottom: 6px; }
+  .primerbody b { color: var(--accent2); }
+  .prov { background: #10261c; border: 1px solid #245c42; color: #9fe3c4; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; }
+  .prov b { color: #d6ffe9; }
+  .tunewrap { display: flex; gap: 22px; flex-wrap: wrap; align-items: flex-start; }
+  .tuneside { flex: 1; min-width: 320px; }
+  #xypad { position: relative; width: 260px; height: 220px; border: 1px solid var(--line); border-radius: 10px; cursor: crosshair;
+           background: linear-gradient(to top right, rgba(90,110,150,.20), rgba(91,214,160,.18) 45%, rgba(255,123,123,.30)); overflow: hidden; }
+  #padzone { position: absolute; left: 12%; top: 18%; width: 56%; height: 60%; border: 1px dashed rgba(91,214,160,.55); border-radius: 8px; pointer-events: none; }
+  #padhandle { position: absolute; width: 20px; height: 20px; margin: -10px 0 0 -10px; border-radius: 50%;
+               background: var(--accent); border: 2px solid #0b0d12; box-shadow: 0 2px 8px rgba(0,0,0,.6); pointer-events: none; }
+  .padtag { position: absolute; font-size: 9px; color: var(--muted); pointer-events: none; }
+  .padtag.tl { top: 5px; left: 6px; } .padtag.tr { top: 5px; right: 6px; }
+  .padtag.bl { bottom: 5px; left: 6px; } .padtag.br { bottom: 5px; right: 6px; }
+  .padlabel { font-size: 11px; color: var(--muted); text-align: center; width: 260px; margin: 6px 0; }
+  .planbox { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font-size: 12px; margin: 12px 0; line-height: 1.7; }
+  .planbox b { color: var(--accent2); }
+  .planbox .warnrow { color: var(--warn); }
+  .statgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px,1fr)); gap: 10px; margin-bottom: 14px; }
+  .statgrid .st { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .statgrid .st span { display: block; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+  .statgrid .st b { font-size: 16px; font-variant-numeric: tabular-nums; }
+  .progwrap { position: relative; height: 22px; background: var(--panel2); border: 1px solid var(--line); border-radius: 999px; overflow: hidden; margin-bottom: 14px; }
+  #progBar { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .4s; }
+  #progTxt { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; }
+
+  /* ---- box editor ---- */
+  #editor { position: fixed; inset: 0; background: rgba(8,10,14,.97); z-index: 100; display: none; flex-direction: column; }
+  #editor.open { display: flex; }
+  #edBar { display: flex; gap: 10px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  #edBar .tool { background: var(--panel2); border: 1px solid var(--line); color: var(--txt); padding: 7px 12px; border-radius: 7px; cursor: pointer; font-size: 13px; }
+  #edBar .tool:hover { border-color: var(--accent); }
+  #edBar .tool.danger { color: var(--bad); }
+  #edBar .spacer { flex: 1; }
+  #edBody { flex: 1; display: flex; min-height: 0; }
+  #edScroll { flex: 1; overflow: auto; padding: 20px; }
+
+  /* review sidebar: every suspect box on this page, as a picture */
+  #edSide { width: 300px; flex: 0 0 300px; border-left: 1px solid var(--line); display: flex; flex-direction: column; background: var(--panel); }
+  #edSide.hidden { display: none; }
+  #edSideHead { padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 12px; display: flex; align-items: center; gap: 8px; }
+  #edSideHead b { color: var(--warn); }
+  #edList { overflow: auto; flex: 1; padding: 8px; }
+  .rvitem { display: block; width: 100%; text-align: left; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 7px; margin-bottom: 7px; cursor: pointer; }
+  .rvitem:hover { border-color: var(--accent); }
+  .rvitem.on { border-color: var(--warn); background: rgba(255,207,107,.10); }
+  .rvitem.done { opacity: .45; }
+  .rvitem img { width: 100%; height: 56px; object-fit: contain; background: #fff; border-radius: 4px; }
+  .rvitem .rvtxt { font-size: 12px; margin-top: 5px; display: flex; justify-content: space-between; gap: 6px; }
+  .rvitem .rvtxt i { color: var(--bad); font-style: normal; }
+  .rvitem .rvtxt s { color: var(--muted); }
+  .rvitem .rvsug { font-size: 11px; color: var(--accent2); margin-top: 2px; }
+  .rvitem .rvwhy { font-size: 10px; color: var(--muted); margin-top: 2px; }
+  .rvitem .rvkeep { font-size: 10px; color: var(--accent2); margin-top: 4px; border: 1px dashed var(--line); border-radius: 5px; padding: 2px 4px; text-align: center; }
+  .rvitem .rvkeep:hover { border-color: var(--accent2); background: rgba(91,214,160,.10); }
+  .bx.kept { border-color: rgba(91,214,160,.85); background: rgba(91,214,160,.12); }
+
+  .bx.flag { border-color: rgba(255,90,90,.95); background: rgba(255,90,90,.14); }
+  .bx.blank { border-style: dashed; border-color: rgba(255,150,40,.95); background: rgba(255,150,40,.14); }
+  .bx.sel { border-color: var(--warn); background: rgba(255,207,107,.18); z-index: 5; }
+  #edPrev { height: 40px; min-width: 90px; max-width: 230px; object-fit: contain; background: #fff; border-radius: 5px; border: 1px solid var(--line); }
+  #edSug { font-size: 12px; color: var(--accent2); background: var(--panel2); border: 1px dashed var(--accent2); border-radius: 6px; padding: 5px 9px; cursor: pointer; white-space: nowrap; }
+  #edSug.hidden, #edPrev.hidden { display: none; }
+  #edWrap { position: relative; margin: 0 auto; transform-origin: top left; }
+  #edWrap img { display: block; user-select: none; -webkit-user-drag: none; }
+  .bx { position: absolute; border: 2px solid rgba(40,220,120,.9); background: rgba(40,220,120,.10); cursor: move; }
+  .bx.manual { border-color: rgba(124,156,255,.95); background: rgba(124,156,255,.12); }
+  .bx.sel { border-color: var(--warn); background: rgba(255,207,107,.18); z-index: 5; }
+  .bx .lbl { position: absolute; top: -17px; left: -2px; font-size: 10px; background: rgba(0,0,0,.75); color: #fff; padding: 0 4px; border-radius: 3px; white-space: nowrap; pointer-events: none; }
+  .hd { position: absolute; width: 10px; height: 10px; background: var(--warn); border: 1px solid #000; border-radius: 2px; }
+  .hd.nw { left: -6px; top: -6px; cursor: nwse-resize; }
+  .hd.ne { right: -6px; top: -6px; cursor: nesw-resize; }
+  .hd.sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
+  .hd.se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+  .hd.n  { left: 50%; top: -6px; margin-left: -5px; cursor: ns-resize; }
+  .hd.s  { left: 50%; bottom: -6px; margin-left: -5px; cursor: ns-resize; }
+  .hd.w  { left: -6px; top: 50%; margin-top: -5px; cursor: ew-resize; }
+  .hd.e  { right: -6px; top: 50%; margin-top: -5px; cursor: ew-resize; }
+  #edText { width: 190px; }
+  kbd { background: var(--panel2); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; font-size: 11px; font-family: inherit; }
+</style>
+</head>
+<body>
+<header>
+  <h1>✍️ Handwriting <span>Studio</span></h1>
+  <div class="pipe" id="pipe"></div>
+</header>
+
+<nav id="nav">
+  <button data-tab="upload" class="active">1 · Upload &amp; Detect</button>
+  <button data-tab="boxes">2 · Edit Boxes</button>
+  <button data-tab="package">3 · Build Dataset</button>
+  <button data-tab="train">4 · Train</button>
+  <button data-tab="generate">5 · Generate &amp; Render</button>
+</nav>
+
+<main>
+  <!-- ===================== UPLOAD & SEGMENT ===================== -->
+  <section class="tab active" id="tab-upload">
+    <div class="card">
+      <h2>Drop in your handwriting scans</h2>
+      <p class="sub">Photos or scans of pages you've handwritten. PNG / JPG / HEIC. They're copied into <code>raw_scans/</code>.</p>
+      <div id="drop">📄 &nbsp;Drag images here, or click to choose files</div>
+      <input type="file" id="fileInput" accept="image/*,.heic" multiple hidden />
+      <div class="thumbs" id="rawThumbs"></div>
+    </div>
+    <div class="card">
+      <h2>Detect &amp; read the words</h2>
+      <p class="sub">Uses Apple's Vision engine (built into macOS — nothing to download) to find every word <i>and</i> transcribe it in one pass. Takes about a second per page. Boxes you've hand-edited are preserved.</p>
+      <div class="flex">
+        <button class="btn" id="segBtn">Run detection</button>
+        <span class="muted">then review in <b>Edit Boxes</b> → <b>Label</b></span>
+      </div>
+      <pre class="log" id="segLog" style="display:none"></pre>
+    </div>
+  </section>
+
+  <!-- ===================== EDIT BOXES ===================== -->
+  <section class="tab" id="tab-boxes">
+    <div class="card">
+      <h2>Fix the word boxes</h2>
+      <p class="sub">Click a page to open it. Click any box to select it — drag to move, pull the handles to resize, <b>Delete</b> to remove. <b>Shift +</b> adds a new box in the middle. Changes you make are protected from being overwritten the next time detection runs.</p>
+      <div class="banner" id="pageSummary" style="margin-top:10px"></div>
+      <div class="pagegrid" id="pageGrid"></div>
+    </div>
+  </section>
+
+  <!-- ===================== PACKAGE ===================== -->
+  <section class="tab" id="tab-package">
+    <div class="card">
+      <h2>Build the training dataset</h2>
+      <p class="sub">Pick which pages to train on, then pack them into <code>dataset/dataset.h5</code>.
+         Only words that passed review are included — a page's flagged words are left out automatically,
+         so you can include a partly-reviewed page and still get its clean words.</p>
+
+      <div id="buildProg" class="buildprog" style="display:none">
+        <div class="bstep" data-s="rebuild"><i></i><span>Cutting word images from your boxes</span></div>
+        <div class="bstep" data-s="labels"><i></i><span>Collecting the confirmed labels</span></div>
+        <div class="bstep" data-s="pack"><i></i><span>Packing into dataset.h5</span></div>
+      </div>
+
+      <div id="buildDone" class="builddone" style="display:none">
+        <svg class="tickmark" viewBox="0 0 52 52"><circle cx="26" cy="26" r="24"/><path d="M14 27l8 8 16-16"/></svg>
+        <div class="bdtitle">Dataset built</div>
+        <div class="bdcount"><b id="bdWords">0</b> <span>word images packed</span></div>
+        <div class="bdgrid" id="bdGrid"></div>
+        <div class="bdnote" id="bdNote"></div>
+      </div>
+
+      <div id="dsSummary" class="dssum"></div>
+
+      <div class="flex" style="margin:14px 0">
+        <button class="btn" id="pkgBtn">Build dataset.h5</button>
+        <button class="btn ghost" id="dsAll">Select all</button>
+        <button class="btn ghost" id="dsNone">Clear</button>
+        <button class="btn ghost" id="dsClean">Only fully-reviewed pages</button>
+      </div>
+
+      <h3 class="dshead">✓ Fully reviewed <span class="muted" id="dsCleanN"></span>
+        <button class="minibtn" id="dsCleanOn">select all</button>
+        <button class="minibtn" id="dsCleanOff">deselect all</button></h3>
+      <p class="sub">No flags left on these — every word is either confirmed or was never questioned.</p>
+      <div class="pagegrid" id="dsGridClean"></div>
+
+      <h3 class="dshead">⚑ Still has flagged words <span class="muted" id="dsFlagN"></span>
+        <button class="minibtn" id="dsFlagOn">select all</button>
+        <button class="minibtn" id="dsFlagOff">deselect all</button></h3>
+      <p class="sub">Safe to include — the flagged words are skipped, only the reviewed ones are used.
+         Reviewing them on <b>2 · Edit Boxes</b> is how you get the rest.</p>
+      <div class="pagegrid" id="dsGridFlag"></div>
+
+      <pre class="log" id="pkgLog" data-quiet="1" style="display:none"></pre>
+    </div>
+  </section>
+
+  <!-- ===================== TRAIN ===================== -->
+  <section class="tab" id="tab-train">
+    <div class="banner">⚠️ Leave the lid <b>open</b> for the whole run — on Apple Silicon, closing the lid sleeps the Mac and pauses training even with caffeinate. Keep it plugged in.</div>
+    <div class="card">
+      <h2>Fine-tune on your handwriting</h2>
+      <p class="sub">Start small (fewer epochs) and watch the live sample. Stop when it looks like your hand — more isn't always better (it can overfit).</p>
+      <div id="provenance" class="prov"></div>
+
+      <details class="primer">
+        <summary>What is this page actually doing? (read this first)</summary>
+        <div class="primerbody">
+          <p>There's a program on this Mac (<code>FW-GAN</code>) that already knows how to draw generic
+          cursive handwriting — it learned that from thousands of other people's handwriting before you
+          ever used this app. <b>Fine-tuning</b> means showing it your 1,975 words over and over, each time
+          nudging its internal settings a tiny bit toward matching your strokes, until its handwriting
+          starts looking like yours instead of a stranger's.</p>
+          <p>Every field below controls <i>how</i> that nudging happens:</p>
+          <ul>
+            <li><b>Epoch</b> = one full pass through all 1,975 of your words. More epochs = it sees your
+            handwriting more times, which usually helps — up to a point where it starts memorizing your
+            exact words instead of learning your general style (called <b>overfitting</b>).</li>
+            <li><b>Step</b> = one nudge, using one small batch of words at a time (not all 1,975 at once —
+            too much to hold in memory). One epoch = many steps.</li>
+            <li><b>Learning rate</b> = how big each nudge is. Too big and it can overshoot and produce
+            garbage; too small and it barely moves in any reasonable amount of time.</li>
+            <li><b>Loss</b> (in the stats below, once running) = a score for "how wrong is it right now" —
+            you want to see this trend down, not need to understand the exact number.</li>
+          </ul>
+          <p>You don't have to get any of this exactly right. The XY pad below turns the two settings that
+          matter most into one drag — and you can always watch the live sample and stop early if it looks
+          wrong.</p>
+        </div>
+      </details>
+
+      <div class="tunewrap">
+        <div>
+          <div class="padlabel">More training ↑</div>
+          <div id="xypad">
+            <div id="padzone"></div>
+            <div id="padhandle"></div>
+            <span class="padtag tl">slow &amp; safe</span>
+            <span class="padtag tr">fast — can break</span>
+            <span class="padtag bl">barely changes</span>
+            <span class="padtag br">quick &amp; rough</span>
+          </div>
+          <div class="padlabel">Bigger steps per update →</div>
+        </div>
+        <div class="tuneside">
+          <div class="segbar" id="presetBar">
+            <button data-p="quick">Quick look</button>
+            <button data-p="balanced" class="on">Balanced</button>
+            <button data-p="thorough">Thorough</button>
+          </div>
+          <div id="planbox" class="planbox"></div>
+          <div class="row">
+            <label class="fld"><span>Epochs</span><small>How many times it re-reads all 1,975 words. More = learns your style better, but too many can make it memorize instead of generalize.</small><input type="number" id="t_epochs" value="40" min="1"></label>
+            <label class="fld"><span>Learning rate</span><small>Size of each nudge toward your handwriting. Bigger = faster change but riskier; smaller = safer but slower.</small><input type="text" id="t_lr" value="1e-4"></label>
+          </div>
+          <div class="row">
+            <label class="fld"><span>Batch size</span><small>How many words it looks at per nudge. Leave at 8 unless training crashes with a memory error — then lower it.</small><input type="number" id="t_batch" value="8" min="1"></label>
+            <label class="fld"><span>Preview every N steps</span><small>How often it stops to draw a sample and save a checkpoint, so you can watch progress without waiting for the whole run.</small><input type="number" id="t_every" value="25" min="1"></label>
+          </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <label class="fld"><span>Style reference</span><small>Which of your crops the sample below borrows ink texture / pen weight from — doesn't affect training, only what the preview looks like.</small><select id="t_style"></select></label>
+        <label class="fld"><span>Sample preview text</span><small>The words rendered in the live sample below, so you can watch the same phrase evolve as training progresses.</small><input type="text" id="t_text" value="the quick brown fox"></label>
+        <label class="fld" style="max-width:200px"><span>Resume from latest?</span><small>"No" starts over from the generic pretrained model. "Yes" picks up from your last checkpoint instead of restarting.</small><select id="t_resume"><option value="">no — fresh</option><option value="1">yes — continue</option></select></label>
+      </div>
+      <div class="flex" style="margin-top:6px">
+        <button class="btn" id="trainStart">Start training</button>
+        <button class="btn danger" id="trainStop" disabled>Stop</button>
+        <span class="muted" id="trainState">idle</span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Live progress</h2>
+      <p class="sub">The sample below is generated from the <i>current</i> weights every N steps — if it stays legible and drifts toward your style, it's working. If it turns to noise, stop and lower the learning rate.</p>
+      <div id="trainStats" class="statgrid"></div>
+      <div id="progWrap" class="progwrap" style="display:none"><div id="progBar"></div><span id="progTxt"></span></div>
+      <div class="bigshot" id="sampleShot"><span class="muted">No sample yet.</span></div>
+      <button class="btn ghost" id="logToggle" style="margin-top:12px">Show raw log</button>
+      <pre class="log" id="trainLog" style="display:none"></pre>
+    </div>
+  </section>
+
+  <!-- ===================== GENERATE & RENDER ===================== -->
+  <section class="tab" id="tab-generate">
+    <div class="card">
+      <h2>Generate handwriting</h2>
+      <p class="sub">Type anything and render it in the handwriting style. Use <b>Fine-tuned</b> once you've trained; <b>Pretrained</b> gives generic handwriting.</p>
+      <label class="fld"><span>Text</span><textarea id="g_text">the quick brown fox jumps over the lazy dog</textarea></label>
+      <div class="row">
+        <label class="fld"><span>Style reference crop</span><select id="g_style"></select></label>
+        <label class="fld"><span>Model</span><select id="g_ckpt"></select></label>
+      </div>
+      <div class="flex">
+        <button class="btn" id="genBtn">Generate words</button>
+        <button class="btn" id="renderBtn">Render full page</button>
+        <label class="fld" style="max-width:120px;margin:0"><span>Page format</span><select id="g_fmt"><option value="png">PNG</option><option value="pdf">PDF</option></select></label>
+      </div>
+      <pre class="log" id="genLog" style="display:none"></pre>
+      <div class="gallery" id="wordGallery"></div>
+      <div class="bigshot" id="pageShot"></div>
+    </div>
+  </section>
+</main>
+
+<!-- ===================== BOX EDITOR OVERLAY ===================== -->
+<div id="editor">
+  <div id="edBar">
+    <button class="tool" id="edClose">← Back</button>
+    <b id="edTitle" style="font-size:13px"></b>
+    <span class="muted" id="edCount"></span>
+    <div class="spacer"></div>
+    <img id="edPrev" class="hidden" alt="what the selected box will cut out">
+    <input type="text" id="edText" placeholder="text for selected box…"
+           spellcheck="true" lang="en-US" autocorrect="on" autocapitalize="off" autocomplete="off" />
+    <button id="edSug" class="hidden" title="Tab to accept"></button>
+    <button class="tool" id="edAdd">＋ Add box <kbd>Shift +</kbd></button>
+    <button class="tool danger" id="edDel">🗑 Delete <kbd>Del</kbd></button>
+    <button class="tool" id="edRotate">↻ Rotate page 180°</button>
+    <button class="tool" id="edZoomOut">－</button><span id="edZoom" class="muted">100%</span><button class="tool" id="edZoomIn">＋</button>
+    <button class="tool" id="edSideToggle">⚑ Review</button>
+    <button class="btn" id="edSave">Save boxes</button>
+  </div>
+  <div id="edBody">
+    <div id="edScroll"><div id="edWrap"><img id="edImg" alt=""></div></div>
+    <aside id="edSide">
+      <div id="edSideHead"><b id="edFlagN">0</b> to check<span class="spacer" style="flex:1"></span>
+        <span class="muted" style="font-size:10px">Enter = next · ⌫ = keep</span></div>
+      <div id="edList"></div>
+    </aside>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => document.querySelectorAll(s);
+
+// ---- tabs ----
+$$('#nav button').forEach(b => b.onclick = () => {
+  $$('#nav button').forEach(x => x.classList.remove('active'));
+  $$('.tab').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  $('#tab-' + b.dataset.tab).classList.add('active');
+  if (b.dataset.tab === 'boxes') loadPages();
+  if (b.dataset.tab === 'package') loadDatasetPages();
+  if (b.dataset.tab === 'train' || b.dataset.tab === 'generate') refreshSelects();
+  if (b.dataset.tab === 'train') setTimeout(syncPadFromFields, 30);
+});
+
+// ---- SSE runner ----
+function runStream(url, logEl, onDone) {
+  if (!logEl.dataset.quiet) logEl.style.display = 'block';
+  logEl.textContent = '';
+  const es = new EventSource(url);
+  es.onmessage = (e) => {
+    if (e.data.startsWith('__DONE__')) {
+      const rc = e.data.split(' ')[1];
+      logEl.textContent += `\n[finished, exit ${rc}]`;
+      es.close();
+      refreshStatus();
+      if (onDone) onDone(rc);
+      return;
+    }
+    logEl.textContent += e.data + '\n';
+    logEl.scrollTop = logEl.scrollHeight;
+  };
+  es.onerror = () => { es.close(); };
+}
+
+// ---- status strip ----
+async function refreshStatus() {
+  const s = await (await fetch('/api/status')).json();
+  const chip = (label, val, ok) =>
+    `<div class="chip ${ok ? 'ok' : ''}"><span class="dot ${ok ? 'on' : ''}"></span>${label} <b>${val}</b></div>`;
+  $('#pipe').innerHTML =
+    chip('scans', s.n_raw, s.n_raw > 0) +
+    chip('crops', s.n_crops, s.n_crops > 0) +
+    chip('labeled', s.n_labeled, s.n_labeled > 0) +
+    chip('dataset', s.dataset_exists ? 'ready' : '—', s.dataset_exists) +
+    chip('fine-tuned', s.has_finetuned ? 'yes' : 'no', s.has_finetuned) +
+    chip('training', s.training ? 'running' : 'idle', s.training);
+  window._status = s;
+  if ($('#provenance')) renderProvenance(s);
+  return s;
+}
+
+async function refreshSelects() {
+  const s = window._status || await refreshStatus();
+  // style crop dropdowns (from crops)
+  const crops = (await (await fetch('/api/crops')).json()).crops.map(c => c.name);
+  for (const id of ['#t_style', '#g_style']) {
+    const sel = $(id); const cur = sel.value;
+    sel.innerHTML = crops.map(c => `<option value="${c}">${c}</option>`).join('') || '<option value="">(no crops yet)</option>';
+    if (crops.includes(cur)) sel.value = cur;
+  }
+  // model dropdown
+  const opts = ['<option value="pretrained">Pretrained (generic)</option>'];
+  (s.checkpoints || []).forEach(c => opts.push(`<option value="${c}">Fine-tuned · ${c}</option>`));
+  const g = $('#g_ckpt'); const cur = g.value; g.innerHTML = opts.join('');
+  if ([...g.options].some(o => o.value === cur)) g.value = cur;
+  else if (s.has_finetuned) g.value = 'latest.pth';
+}
+
+// ---- upload ----
+const drop = $('#drop'), fileInput = $('#fileInput');
+drop.onclick = () => fileInput.click();
+['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('hot'); }));
+['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('hot'); }));
+drop.addEventListener('drop', e => uploadFiles(e.dataTransfer.files));
+fileInput.onchange = () => uploadFiles(fileInput.files);
+
+async function uploadFiles(files) {
+  if (!files.length) return;
+  const fd = new FormData();
+  for (const f of files) fd.append('files', f);
+  drop.textContent = 'Uploading…';
+  const r = await (await fetch('/api/upload', { method: 'POST', body: fd })).json();
+  drop.textContent = '📄  Drag images here, or click to choose files';
+  await refreshStatus(); loadRawThumbs();
+  if (r.rejected.length) alert('Skipped non-images: ' + r.rejected.join(', '));
+}
+
+async function loadRawThumbs() {
+  const s = await refreshStatus();
+  $('#rawThumbs').innerHTML = s.raw_scans.map(n =>
+    `<div class="thumb"><img src="/img/raw/${encodeURIComponent(n)}?t=${Date.now()}"><div>${n}</div></div>`).join('');
+}
+
+$('#segBtn').onclick = () => runStream('/api/detect', $('#segLog'), () => {
+  runStream('/api/curate', $('#segLog'), () => { refreshSelects(); loadPages(); });
+});
+
+function esc(s) { return (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+
+// ---- box editor ----
+const ED = { key: null, scan: null, boxes: [], sel: null, zoom: 1, w: 0, h: 0,
+             dirty: false, review: [], rvPos: -1, typingSnap: false };
+
+const WHY = {
+  misspelled: 'not a word — probably misread',
+  not_a_word: 'not readable as a word',
+  too_short:  'too short to be a word',
+  empty:      'no label',
+  blank:      'box looks empty — check it',
+};
+
+async function loadPages() {
+  const r = await (await fetch('/api/pages')).json();
+  $('#pageGrid').innerHTML = r.pages.map(p => `
+    <div class="pagecard${p.flagged ? ' needsfix' : ''}" data-key="${p.key}" data-scan="${esc(p.scan)}">
+      <img src="${p.ready ? '/page_img/' + p.key : '/img/raw/' + encodeURIComponent(p.scan)}" loading="lazy">
+      ${p.flagged ? `<span class="fixbadge">⚑ ${p.flagged}</span>` : ''}
+      <div class="meta">
+        <span><b>${p.boxes}</b> boxes${p.rotation ? ' · ' + p.rotation + '°' : ''}</span>
+        <span>${p.flagged ? `<b class="flagn">${p.flagged} to fix</b>` : '<span class="cleanok">✓ clean</span>'}</span>
+      </div>
+    </div>`).join('') || '<p class="muted">No pages yet — upload some scans.</p>';
+  const tf = r.pages.reduce((a, p) => a + p.flagged, 0);
+  const np = r.pages.filter(p => p.flagged).length;
+  $('#pageSummary').innerHTML = tf
+    ? `<b class="flagn">${tf} boxes need review</b> across ${np} of ${r.pages.length} pages — open a page and work down its ⚑ list.`
+    : `<span class="cleanok">✓ Nothing flagged on any page.</span>`;
+  $$('#pageGrid .pagecard').forEach(c => c.onclick = () => openEditor(c.dataset.key, c.dataset.scan));
+}
+
+async function openEditor(key, scan) {
+  const doc = await (await fetch(`/api/page/${key}/boxes`)).json();
+  if (doc.detail) { alert(doc.detail); return; }
+  ED.key = key; ED.scan = scan; ED.boxes = doc.boxes; ED.sel = null; ED.dirty = false;
+  ED.w = doc.width; ED.h = doc.height;
+  // innerWidth can read 0 while the tab is still settling, which without a
+  // floor yields a NEGATIVE zoom and an invisible page.
+  const avail = Math.max(420, (window.innerWidth || 1280) - 380);
+  ED.zoom = Math.max(0.15, Math.min(1, avail / doc.width));
+  $('#edImg').src = '/page_img/' + key;
+  $('#edTitle').textContent = scan;
+  $('#editor').classList.add('open');
+  UNDO.length = 0; REDO.length = 0;
+  renderReview();
+  drawBoxes();
+}
+
+// ---- undo / redo ----
+// Snapshots the whole box array. At ~250 boxes a snapshot is a few tens of KB
+// of JSON, and the cap keeps the stack bounded; simpler and far less bug-prone
+// than tracking per-field deltas.
+const UNDO = [], REDO = [];
+function snap() {
+  UNDO.push(JSON.stringify(ED.boxes));
+  if (UNDO.length > 60) UNDO.shift();
+  REDO.length = 0;
+  ED.typingSnap = true;
+}
+function restore(from, to) {
+  if (!from.length) return;
+  to.push(JSON.stringify(ED.boxes));
+  ED.boxes = JSON.parse(from.pop());
+  ED.sel = null; ED.dirty = true; ED.typingSnap = false;
+  renderReview(); drawBoxes(); updatePreview();
+}
+
+// ---- review queue: every suspect box on the page, as a picture ----
+function renderReview() {
+  ED.review = ED.boxes.map((b, i) => i).filter(i => ED.boxes[i].flag);
+  ED.rvPos = -1;
+  $('#edFlagN').textContent = ED.review.length;
+  $('#edList').innerHTML = ED.review.map(i => {
+    const b = ED.boxes[i];
+    return `<button class="rvitem" data-i="${i}">
+      ${b.id ? `<img src="${boxImg(b)}" loading="lazy" alt="">` : ''}
+      <div class="rvtxt"><i>${esc(b.text) || '(no label)'}</i></div>
+      ${b.suggest ? `<div class="rvsug">→ ${esc(b.suggest)} <span class="muted">(Tab)</span></div>` : ''}
+      <div class="rvwhy">${WHY[b.flag] || b.flag}</div>
+      <div class="rvkeep" data-keep="${i}">✓ keep as written <span class="muted">(⌫)</span></div>
+    </button>`;
+  }).join('') || '<p class="muted" style="padding:10px;font-size:12px">Nothing flagged on this page.</p>';
+  $$('#edList .rvitem').forEach(el =>
+    el.onclick = () => gotoReview(ED.review.indexOf(+el.dataset.i)));
+  $$('#edList .rvkeep').forEach(el => el.onclick = (ev) => {
+    ev.stopPropagation();
+    gotoReview(ED.review.indexOf(+el.dataset.keep));
+    acceptBox();
+  });
+}
+
+function boxImg(b) {
+  // geometry in the query string, so the preview follows an unsaved drag
+  return `/img/box/${ED.key}/${b.id}?x=${b.x}&y=${b.y}&w=${b.w}&h=${b.h}`;
+}
+
+function markReview() {
+  $$('#edList .rvitem').forEach(el => {
+    const i = +el.dataset.i, b = ED.boxes[i];
+    if (!b) return;
+    el.classList.toggle('on', i === ED.sel);
+    el.classList.toggle('done', !!b.reviewed);
+    const t = el.querySelector('.rvtxt i');
+    if (t) t.textContent = b.text || '(no label)';
+  });
+  const on = $('#edList .rvitem.on');
+  if (on) on.scrollIntoView({ block: 'nearest' });
+}
+
+function gotoReview(pos) {
+  if (pos < 0 || pos >= ED.review.length) return;
+  ED.rvPos = pos;
+  selectBox(ED.review[pos]);
+}
+
+/** Mark the current box correct as written, overriding the spell check.
+ *  These are Blake's own notes -- some words really are misspelled on paper,
+ *  and the label has to match the image, not the dictionary. */
+function acceptBox() {
+  const b = ED.boxes[ED.sel]; if (!b) return;
+  snap();
+  b.accepted = true; b.flag = null; b.suggest = null;
+  b.edited = true; ED.dirty = true;
+  $('#edSug').classList.add('hidden');
+  drawBoxes();
+  commitAndNext();
+}
+
+/** Commit what's typed and jump to the next unreviewed flag. */
+function commitAndNext() {
+  const b = ED.boxes[ED.sel];
+  if (b) { b.reviewed = true; ED.dirty = true; }
+  if (!ED.review.length) return;
+  const from = ED.rvPos < 0 ? -1 : ED.rvPos;
+  for (let k = 1; k <= ED.review.length; k++) {
+    const q = (from + k + ED.review.length) % ED.review.length;
+    if (!ED.boxes[ED.review[q]].reviewed) { gotoReview(q); return; }
+  }
+  markReview();
+  $('#edText').blur();
+  $('#edCount').textContent = 'all flags reviewed — Save boxes';
+}
+
+function drawBoxes() {
+  const w = $('#edWrap');
+  [...w.querySelectorAll('.bx')].forEach(n => n.remove());
+  w.style.width = (ED.w * ED.zoom) + 'px';
+  $('#edImg').style.width = (ED.w * ED.zoom) + 'px';
+  $('#edZoom').textContent = Math.round(ED.zoom * 100) + '%';
+  $('#edCount').textContent = `${ED.boxes.length} boxes${ED.dirty ? ' · unsaved' : ''}`;
+  ED.boxes.forEach((b, i) => {
+    const d = document.createElement('div');
+    d.className = 'bx'
+      + (b.source === 'manual' || b.edited ? ' manual' : '')
+      + (b.flag && !b.reviewed ? ' flag' : '')
+      + (b.flag === 'blank' ? ' blank' : '')
+      + (b.accepted ? ' kept' : '')
+      + (i === ED.sel ? ' sel' : '');
+    d.style.left = (b.x * ED.zoom) + 'px'; d.style.top = (b.y * ED.zoom) + 'px';
+    d.style.width = (b.w * ED.zoom) + 'px'; d.style.height = (b.h * ED.zoom) + 'px';
+    d.dataset.i = i;
+    if (b.text) d.innerHTML = `<span class="lbl">${esc(b.text)}</span>`;
+    if (i === ED.sel) ['nw','n','ne','w','e','sw','s','se'].forEach(p => {
+      const hd = document.createElement('div'); hd.className = 'hd ' + p; hd.dataset.h = p; d.appendChild(hd);
+    });
+    w.appendChild(d);
+  });
+  const b = ED.boxes[ED.sel];
+  $('#edText').value = b ? (b.text || '') : '';
+  const sg = $('#edSug');
+  if (b && b.suggest && !b.reviewed) { sg.textContent = '→ ' + b.suggest; sg.classList.remove('hidden'); }
+  else sg.classList.add('hidden');
+  markReview();
+}
+
+/** Refresh the "what will this box actually cut out" thumbnail.
+ *  Kept out of drawBoxes(), which runs on every mousemove while dragging --
+ *  reloading the image that often would hammer the server for nothing. */
+function updatePreview() {
+  const b = ED.boxes[ED.sel], pv = $('#edPrev');
+  if (b && b.id) { pv.src = boxImg(b); pv.classList.remove('hidden'); }
+  else pv.classList.add('hidden');
+}
+
+function scrollBoxIntoView(b) {
+  const sc = $('#edScroll');
+  sc.scrollTo({ left: (b.x + b.w / 2) * ED.zoom - sc.clientWidth / 2,
+                top:  (b.y + b.h / 2) * ED.zoom - sc.clientHeight / 2,
+                behavior: 'smooth' });
+}
+
+function selectBox(i, opts) {
+  ED.sel = i;
+  const b = ED.boxes[i];
+  const p = ED.review.indexOf(i);
+  if (p >= 0) ED.rvPos = p;
+  drawBoxes();
+  updatePreview();
+  if (b && !(opts && opts.noScroll)) scrollBoxIntoView(b);
+  // Select the existing text so the correct word can just be typed over it.
+  ED.typingSnap = false;
+  const t = $('#edText');
+  t.focus();
+  t.select();
+}
+
+// drag + resize, all math in image coordinates so zoom never distorts a box
+$('#edWrap').addEventListener('mousedown', (e) => {
+  const hd = e.target.closest('.hd'), bx = e.target.closest('.bx');
+  if (!bx && !hd) { ED.sel = null; drawBoxes(); updatePreview(); return; }
+  const i = +(hd ? hd.parentElement : bx).dataset.i;
+  // Always re-select: that's what focuses and highlights the text field, which
+  // is the whole point of clicking a box you want to relabel.
+  selectBox(i, { noScroll: true });
+  const b = ED.boxes[i], mode = hd ? hd.dataset.h : 'move';
+  snap();
+  const sx = e.clientX, sy = e.clientY, o = { ...b };
+  e.preventDefault();
+
+  const mv = (ev) => {
+    const dx = (ev.clientX - sx) / ED.zoom, dy = (ev.clientY - sy) / ED.zoom;
+    let { x, y, w, h } = o;
+    if (mode === 'move') { x = o.x + dx; y = o.y + dy; }
+    else {
+      if (mode.includes('w')) { x = o.x + dx; w = o.w - dx; }
+      if (mode.includes('e')) { w = o.w + dx; }
+      if (mode.includes('n')) { y = o.y + dy; h = o.h - dy; }
+      if (mode.includes('s')) { h = o.h + dy; }
+    }
+    if (w < 6 || h < 6) return;                      // don't let a box invert
+    b.x = Math.max(0, Math.round(Math.min(x, ED.w))); b.y = Math.max(0, Math.round(Math.min(y, ED.h)));
+    b.w = Math.round(w); b.h = Math.round(h);
+    b.edited = true; ED.dirty = true;
+    drawBoxes();
+  };
+  const up = () => {
+    document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
+    updatePreview();   // the box may have moved off its word — show what it holds now
+  };
+  document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+});
+
+function addBox() {
+  snap();
+  const sc = $('#edScroll');
+  // spawn at the middle of what's currently on screen, in image coords
+  const cx = (sc.scrollLeft + sc.clientWidth / 2) / ED.zoom;
+  const cy = (sc.scrollTop + sc.clientHeight / 2) / ED.zoom;
+  const w = 140, h = 46;
+  ED.boxes.push({ id: '', x: Math.round(cx - w / 2), y: Math.round(cy - h / 2), w, h,
+                  text: '', conf: 0, source: 'manual', edited: true });
+  ED.dirty = true;
+  selectBox(ED.boxes.length - 1, { noScroll: true });
+}
+function delBox() {
+  if (ED.sel === null) return;
+  snap();
+  ED.boxes.splice(ED.sel, 1); ED.sel = null; ED.dirty = true;
+  renderReview();               // splicing shifted every index after this one
+  drawBoxes(); updatePreview();
+}
+
+$('#edAdd').onclick = addBox;
+$('#edDel').onclick = delBox;
+$('#edZoomIn').onclick = () => { ED.zoom = Math.min(3, ED.zoom * 1.25); drawBoxes(); };
+$('#edZoomOut').onclick = () => { ED.zoom = Math.max(.1, ED.zoom / 1.25); drawBoxes(); };
+
+function applyText(v) {
+  const b = ED.boxes[ED.sel]; if (!b) return;
+  b.text = v; b.edited = true; ED.dirty = true;
+  $('#edText').value = v;
+  let n = $(`#edWrap .bx[data-i="${ED.sel}"] .lbl`);
+  if (!n) {                                   // a box that had no label before
+    const d = $(`#edWrap .bx[data-i="${ED.sel}"]`);
+    if (d) { n = document.createElement('span'); n.className = 'lbl'; d.appendChild(n); }
+  }
+  if (n) n.textContent = v;
+  const t = $('#edList .rvitem.on .rvtxt i');
+  if (t) t.textContent = v || '(no label)';
+  $('#edCount').textContent = `${ED.boxes.length} boxes · unsaved`;
+}
+
+// Live-check what's typed against the document's own vocabulary, not just the
+// browser's generic dictionary -- "operations", "forecast" etc. are jargon a
+// generic spellchecker doesn't know, but this document uses them constantly.
+let checkTimer = null;
+function liveCheck(v) {
+  clearTimeout(checkTimer);
+  const b = ED.boxes[ED.sel];
+  if (!b) return;
+  if (!v.trim()) { b.flag = null; b.suggest = null; $('#edSug').classList.add('hidden'); return; }
+  checkTimer = setTimeout(async () => {
+    if (ED.boxes[ED.sel] !== b || $('#edText').value !== v) return;  // stale
+    const r = await (await fetch('/api/checkword?text=' + encodeURIComponent(v))).json();
+    if (ED.boxes[ED.sel] !== b || $('#edText').value !== v) return;  // stale
+    b.flag = r.flag; b.suggest = r.suggest;
+    const sg = $('#edSug');
+    if (b.suggest) { sg.textContent = '→ ' + b.suggest; sg.classList.remove('hidden'); }
+    else sg.classList.add('hidden');
+  }, 350);
+}
+
+$('#edText').oninput = (e) => {
+  if (!ED.typingSnap) { snap(); }          // snap() sets typingSnap
+  applyText(e.target.value); liveCheck(e.target.value);
+};
+
+$('#edText').onkeydown = (e) => {
+  const b = ED.boxes[ED.sel];
+  if (e.key === 'Tab' && !e.shiftKey && b && b.suggest) {
+    e.preventDefault(); applyText(b.suggest); return;
+  }
+  if (e.key === 'Enter') { e.preventDefault(); commitAndNext(); return; }
+  // Backspace while the text is still fully selected (i.e. straight after
+  // picking a box, before typing anything) means "this is right as written".
+  // Once the cursor has moved it deletes characters as normal.
+  if (e.key === 'Backspace' && e.target.selectionStart === 0 &&
+      e.target.selectionEnd === e.target.value.length && e.target.value) {
+    e.preventDefault(); acceptBox(); return;
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
+    e.preventDefault();
+    if (e.shiftKey) restore(REDO, UNDO); else restore(UNDO, REDO);
+    return;
+  }
+  if (e.key === 'Escape') { e.preventDefault(); e.target.blur(); return; }
+  // Shortcuts still need to work while the field has focus, since selecting a
+  // box now focuses it automatically.
+  if (e.shiftKey && (e.key === '+' || e.key === '=')) { e.preventDefault(); addBox(); }
+  if (e.shiftKey && (e.key === 'Delete' || e.key === 'Backspace')) { e.preventDefault(); delBox(); }
+};
+
+$('#edSug').onclick = () => {
+  const b = ED.boxes[ED.sel];
+  if (b && b.suggest) { applyText(b.suggest); $('#edText').focus(); }
+};
+$('#edSideToggle').onclick = () => $('#edSide').classList.toggle('hidden');
+$('#edClose').onclick = () => {
+  if (ED.dirty && !confirm('Close without saving your box changes?')) return;
+  $('#editor').classList.remove('open'); loadPages();
+};
+$('#edRotate').onclick = async () => {
+  await fetch(`/api/page/${ED.key}/rotate`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ degrees: 180 }) });
+  alert('Rotation recorded. Re-detect this page from step 1 to redetect it the right way up.');
+};
+$('#edSave').onclick = async () => {
+  const r = await (await fetch(`/api/page/${ED.key}/boxes`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ boxes: ED.boxes })
+  })).json();
+  // Re-fetch so the flags reflect what was just saved, rather than leaving the
+  // sidebar showing objections to words that have already been corrected.
+  const doc = await (await fetch(`/api/page/${ED.key}/boxes`)).json();
+  ED.boxes = doc.boxes; ED.sel = null; ED.dirty = false;
+  UNDO.length = 0; REDO.length = 0;
+  renderReview(); drawBoxes(); updatePreview();
+  $('#edCount').textContent = `${ED.boxes.length} boxes · saved · ${doc.flagged} still flagged`;
+};
+
+document.addEventListener('keydown', (e) => {
+  if (!$('#editor').classList.contains('open')) return;
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
+    e.preventDefault();
+    if (e.shiftKey) restore(REDO, UNDO); else restore(UNDO, REDO);
+    return;
+  }
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); delBox(); }
+  if (e.key === '+' || e.key === '=') { e.preventDefault(); addBox(); }
+  if (e.key === 'Escape') $('#edClose').click();
+});
+
+// ---- package ----
+// ---- dataset builder: choose which pages go into training ----
+// Sizing guidance is measured, not invented: models/FW_GAN/data/test.hdf5 --
+// the IAM data this model was built around -- holds 25,766 words from 161
+// writers, a median of 96 words per writer (p25 74, p75 167, max 821). So a
+// few hundred confirmed words is already a normal amount of material for one
+// person's style; the thing that actually runs short is CHARACTER coverage,
+// because the model cannot draw a letter it was never shown.
+const DS = { pages: [], sel: new Set() };
+const LOWER = 'abcdefghijklmnopqrstuvwxyz', UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+async function loadDatasetPages() {
+  const r = await (await fetch('/api/pages')).json();
+  DS.pages = r.pages;
+  if (!DS.sel.size) DS.pages.forEach(p => { if (p.trainable) DS.sel.add(p.key); });
+  renderDataset();
+}
+
+function dsCard(p) {
+  return `<div class="pagecard${DS.sel.has(p.key) ? ' pick' : ''}${p.flagged ? ' needsfix' : ''}" data-key="${p.key}">
+    <span class="tick">✓</span>
+    <img src="${p.ready ? '/page_img/' + p.key : '/img/raw/' + encodeURIComponent(p.scan)}" loading="lazy">
+    ${p.flagged ? `<span class="fixbadge">⚑ ${p.flagged}</span>` : ''}
+    <div class="meta">
+      <span><b>${p.trainable}</b> words ready</span>
+      <span>${p.flagged ? `<b class="flagn">${p.flagged} skipped</b>` : '<span class="cleanok">✓ all</span>'}</span>
+    </div>
+  </div>`;
+}
+
+function renderDataset() {
+  const clean = DS.pages.filter(p => !p.flagged);
+  const flag  = DS.pages.filter(p => p.flagged);
+  $('#dsGridClean').innerHTML = clean.map(dsCard).join('') || '<p class="muted">No fully-reviewed pages yet.</p>';
+  $('#dsGridFlag').innerHTML  = flag.map(dsCard).join('')  || '<p class="muted">Nothing left with flags.</p>';
+  $('#dsCleanN').textContent = `— ${clean.length} page${clean.length === 1 ? '' : 's'}`;
+  $('#dsFlagN').textContent  = `— ${flag.length} page${flag.length === 1 ? '' : 's'}`;
+  $$('#tab-package .pagecard').forEach(c => c.onclick = () => {
+    const k = c.dataset.key;
+    DS.sel.has(k) ? DS.sel.delete(k) : DS.sel.add(k);
+    renderDataset();
+  });
+  renderDsSummary();
+}
+
+function renderDsSummary() {
+  const picked = DS.pages.filter(p => DS.sel.has(p.key));
+  const words = picked.reduce((a, p) => a + p.trainable, 0);
+  const skipped = picked.reduce((a, p) => a + p.flagged, 0);
+  const chars = new Set();
+  picked.forEach(p => [...(p.chars || '')].forEach(c => chars.add(c)));
+  const missLower = [...LOWER].filter(c => !chars.has(c));
+  const missUpper = [...UPPER].filter(c => !chars.has(c));
+
+  let cls = 'good', msg;
+  if (words === 0)        { cls = 'low'; msg = 'Nothing selected — pick at least a few pages.'; }
+  else if (words < 300)   { cls = 'low'; msg = `${words} words is thin. The reference data this model was built on averages ~96 words <i>per writer</i>, so this can capture a style — but with so few examples it will memorise them quickly. Aim for 300+ if you can.`; }
+  else if (words < 800)   { cls = 'ok';  msg = `${words} words is workable — comfortably more than the ~96 per writer in the model's own training data. Use fewer epochs and watch the live sample for overfitting.`; }
+  else if (words <= 2500) { cls = 'good'; msg = `${words} words is a good size — more than any single writer in the model's reference set (the most prolific had 821). This is the range to aim for.`; }
+  else                    { cls = 'good'; msg = `${words} words is plenty. Past this, extra pages add little; fixing flagged words is worth more than adding volume.`; }
+
+  const missTxt = [];
+  if (missLower.length) missTxt.push(`lowercase <code>${missLower.join(' ')}</code>`);
+  if (missUpper.length) missTxt.push(`capitals <code>${missUpper.join(' ')}</code>`);
+
+  $('#dsSummary').innerHTML = `
+    <div class="big">
+      <div><span>Pages selected</span><b>${picked.length} <small class="muted">/ ${DS.pages.length}</small></b></div>
+      <div><span>Words in dataset</span><b>${words.toLocaleString()}</b></div>
+      <div><span>Letters covered</span><b>${chars.size}</b></div>
+      <div><span>Flagged, skipped</span><b class="${skipped ? 'flagn' : ''}">${skipped.toLocaleString()}</b></div>
+    </div>
+    <div class="verdict ${cls}">${msg}</div>
+    ${missTxt.length
+      ? `<div class="miss">Never appears in this selection: ${missTxt.join(' · ')} — the model can't learn to draw a character it has never seen. Add pages containing them if you need them.</div>`
+      : `<div class="miss">✓ Every letter a–z and A–Z appears somewhere in this selection.</div>`}`;
+}
+
+const dsSet = (list, on) => { list.forEach(p => { if (!p.trainable) return; on ? DS.sel.add(p.key) : DS.sel.delete(p.key); }); renderDataset(); };
+$('#dsCleanOn').onclick  = () => dsSet(DS.pages.filter(p => !p.flagged), true);
+$('#dsCleanOff').onclick = () => dsSet(DS.pages.filter(p => !p.flagged), false);
+$('#dsFlagOn').onclick   = () => dsSet(DS.pages.filter(p => p.flagged), true);
+$('#dsFlagOff').onclick  = () => dsSet(DS.pages.filter(p => p.flagged), false);
+$('#dsAll').onclick   = () => { DS.pages.forEach(p => p.trainable && DS.sel.add(p.key)); renderDataset(); };
+$('#dsNone').onclick  = () => { DS.sel.clear(); renderDataset(); };
+$('#dsClean').onclick = () => { DS.sel.clear(); DS.pages.forEach(p => { if (!p.flagged && p.trainable) DS.sel.add(p.key); }); renderDataset(); };
+
+// One button, whole chain: boxes -> crops -> labels -> dataset.h5, so what
+// you reviewed on the Edit Boxes page is exactly what gets trained on.
+/** Scroll an element under the sticky header and make sure it lands there.
+ *  Smooth scrolling is driven by requestAnimationFrame, which browsers throttle
+ *  in background tabs -- so the position is re-asserted on a plain timer. The
+ *  animation is a nicety; ending up at the right place is not optional. */
+function scrollToEl(el) {
+  const target = () => Math.max(0, el.getBoundingClientRect().top + window.scrollY - 96);
+  window.scrollTo({ top: target(), behavior: 'smooth' });
+  setTimeout(() => {
+    const t = target();
+    if (Math.abs(window.scrollY - t) > 40) window.scrollTo(0, t);
+  }, 450);
+}
+
+function bstep(name, state) {
+  const el = $(`#buildProg .bstep[data-s="${name}"]`);
+  if (el) el.className = 'bstep' + (state ? ' ' + state : '');
+}
+
+/** Count a number up so the result reads as an event, not a static label.
+ *  requestAnimationFrame is throttled (or never fires) when the tab is in the
+ *  background, so the final value is also written on a plain timer -- the
+ *  animation is decoration, the number is not allowed to depend on it. */
+function countUp(el, to, ms) {
+  const final = to.toLocaleString();
+  const t0 = performance.now();
+  const tick = (now) => {
+    const k = Math.min(1, (now - t0) / ms);
+    el.textContent = Math.round(to * (1 - Math.pow(1 - k, 3))).toLocaleString();
+    if (k < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+  setTimeout(() => { el.textContent = final; }, ms + 120);
+}
+
+async function showBuildResult(predicted) {
+  const d = await (await fetch('/api/dataset_info')).json();
+  if (!d.exists) return;
+  $('#buildProg').style.display = 'none';
+  const box = $('#buildDone');
+  box.style.display = 'block';
+  scrollToEl(box);
+  box.style.animation = 'none'; void box.offsetWidth; box.style.animation = '';
+  countUp($('#bdWords'), d.samples, 900);
+  $('#bdGrid').innerHTML = `
+    <div><span>Pages</span><b>${d.pages}</b></div>
+    <div><span>Unique words</span><b>${d.unique_words.toLocaleString()}</b></div>
+    <div><span>Letters covered</span><b>${d.n_chars}</b></div>
+    <div><span>Avg word length</span><b>${d.avg_word_len}</b></div>
+    <div><span>File size</span><b>${(d.bytes / 1048576).toFixed(1)} MB</b></div>`;
+  // The packager validates each crop and can refuse some, so the file may hold
+  // fewer than labels.csv asked for. Say so rather than quietly showing a
+  // smaller number than the one promised before the build.
+  const dropped = (d.requested || 0) - d.samples;
+  const bad = (d.unsupported || []).map(([c, n]) => `<code>${esc(c)}</code>×${n}`).join(' ');
+  $('#bdNote').innerHTML = dropped > 0
+    ? `<span class="warn">${dropped} word${dropped === 1 ? '' : 's'} left out</span> —
+       ${d.samples.toLocaleString()} of ${d.requested.toLocaleString()} made it in.
+       ${bad ? `They use characters outside the model's 81-character alphabet (${bad}), so it has no way to draw them.`
+             : `The packager rejected them during image validation.`}
+       Ready to train on <b>5 · Train</b>.`
+    : `Every confirmed word made it in. Ready to train on <b>5 · Train</b>.`;
+}
+
+$('#pkgBtn').onclick = () => {
+  if (!DS.sel.size) { alert('Select at least one page first.'); return; }
+  const pages = encodeURIComponent([...DS.sel].join(','));
+  const predicted = DS.pages.filter(p => DS.sel.has(p.key)).reduce((a, p) => a + p.trainable, 0);
+  $('#buildDone').style.display = 'none';
+  $('#buildProg').style.display = 'block';
+  scrollToEl($('#buildProg'));
+  $('#pkgBtn').disabled = true;
+  ['rebuild', 'labels', 'pack'].forEach(n => bstep(n, ''));
+  bstep('rebuild', 'run');
+  runStream('/api/rebuild', $('#pkgLog'), () => {
+    bstep('rebuild', 'ok'); bstep('labels', 'run');
+    runStream('/api/buildlabels?pages=' + pages, $('#pkgLog'), () => {
+      bstep('labels', 'ok'); bstep('pack', 'run');
+      runStream('/api/package', $('#pkgLog'), (rc) => {
+        bstep('pack', 'ok');
+        $('#pkgBtn').disabled = false;
+        refreshStatus();
+        if (rc === '0' || rc === 0) showBuildResult(predicted);
+        else { $('#buildProg').style.display = 'none'; $('#pkgLog').style.display = 'block'; }
+      });
+    });
+  });
+};
+
+// ---- train ----
+// ---- training: XY pad, presets, plan ----
+// The pad maps the two knobs that genuinely trade off against each other:
+// how FAR the model is allowed to move (learning rate) and how LONG it moves
+// for (epochs). Their product is roughly "total change", which is why a
+// diagonal band is the safe region and the two far corners are the failure
+// modes. The number fields stay authoritative and editable -- 1e-4 vs 3e-4
+// matters, and you can't hit that reliably by dragging.
+const LR_MIN = 1e-5, LR_MAX = 1e-3, EP_MIN = 5, EP_MAX = 120;
+const PRESETS = {
+  quick:    { epochs: 8,   lr: '1e-4',  batch: 8, every: 25 },
+  balanced: { epochs: 40,  lr: '1e-4',  batch: 8, every: 25 },
+  thorough: { epochs: 100, lr: '5e-5',  batch: 8, every: 50 },
+};
+let N_PAIRS = 0;
+
+function lrToX(lr) {
+  const t = (Math.log10(lr) - Math.log10(LR_MIN)) / (Math.log10(LR_MAX) - Math.log10(LR_MIN));
+  return Math.min(1, Math.max(0, t));
+}
+function xToLr(x) {
+  const e = Math.log10(LR_MIN) + x * (Math.log10(LR_MAX) - Math.log10(LR_MIN));
+  const v = Math.pow(10, e);
+  // round to 1 significant figure so the field shows 1e-4, not 9.7e-5
+  const mag = Math.pow(10, Math.floor(Math.log10(v)));
+  return Math.round(v / mag) * mag;
+}
+function fmtLr(v) { return v.toExponential(0).replace('e-', 'e-'); }
+
+function syncPadFromFields() {
+  const lr = parseFloat($('#t_lr').value) || 1e-4;
+  const ep = +$('#t_epochs').value || 40;
+  const x = lrToX(lr);
+  const y = 1 - Math.min(1, Math.max(0, (ep - EP_MIN) / (EP_MAX - EP_MIN)));
+  const pad = $('#xypad');
+  $('#padhandle').style.left = (x * pad.clientWidth) + 'px';
+  $('#padhandle').style.top = (y * pad.clientHeight) + 'px';
+  renderPlan();
+}
+
+function padSet(clientX, clientY) {
+  const pad = $('#xypad'), r = pad.getBoundingClientRect();
+  const x = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+  const y = Math.min(1, Math.max(0, (clientY - r.top) / r.height));
+  $('#t_lr').value = fmtLr(xToLr(x));
+  $('#t_epochs').value = Math.round(EP_MIN + (1 - y) * (EP_MAX - EP_MIN));
+  $('#padhandle').style.left = (x * r.width) + 'px';
+  $('#padhandle').style.top = (y * r.height) + 'px';
+  $$('#presetBar button').forEach(b => b.classList.remove('on'));
+  renderPlan();
+}
+
+$('#xypad').addEventListener('mousedown', (e) => {
+  padSet(e.clientX, e.clientY);
+  const mv = (ev) => padSet(ev.clientX, ev.clientY);
+  const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); };
+  document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+});
+
+$$('#presetBar button').forEach(b => b.onclick = () => {
+  const p = PRESETS[b.dataset.p];
+  $('#t_epochs').value = p.epochs; $('#t_lr').value = p.lr;
+  $('#t_batch').value = p.batch; $('#t_every').value = p.every;
+  $$('#presetBar button').forEach(x => x.classList.remove('on'));
+  b.classList.add('on');
+  syncPadFromFields();
+});
+['#t_epochs', '#t_lr', '#t_batch', '#t_every'].forEach(id =>
+  $(id).addEventListener('input', () => {
+    $$('#presetBar button').forEach(b => b.classList.remove('on'));
+    syncPadFromFields();
+  }));
+
+function renderPlan() {
+  const ep = +$('#t_epochs').value || 0, bs = +$('#t_batch').value || 1;
+  const lr = parseFloat($('#t_lr').value) || 0, every = +$('#t_every').value || 1;
+  const spe = Math.ceil(N_PAIRS / bs), total = spe * ep;
+  const warn = [];
+  if (lr > 3e-4 && ep > 60) warn.push('High learning rate <b>and</b> a long run — most likely to destabilise. Watch the first samples.');
+  else if (lr > 5e-4) warn.push('Learning rate is high; if samples turn to noise, stop and halve it.');
+  if (lr < 3e-5 && ep < 20) warn.push('Small steps and few passes — this may barely change anything.');
+  if (ep > 80) warn.push('Long run on 1,975 words risks overfitting — watch for samples that stop improving.');
+  if (bs > N_PAIRS) warn.push('Batch size exceeds the dataset; it will be capped automatically.');
+  $('#planbox').innerHTML =
+    `<div><b>${spe}</b> steps per epoch × <b>${ep}</b> epochs = <b>${total.toLocaleString()}</b> steps</div>
+     <div><b>${Math.floor(total / every)}</b> preview images and checkpoints along the way</div>
+     <div class="muted">${N_PAIRS.toLocaleString()} of your words · batch ${bs} · lr ${$('#t_lr').value}</div>
+     ${warn.map(w => `<div class="warnrow">⚠ ${w}</div>`).join('')}`;
+}
+
+function renderProvenance(s) {
+  N_PAIRS = s.n_labeled || 0;
+  $('#provenance').innerHTML =
+    `✓ Training on <b>${N_PAIRS.toLocaleString()}</b> word images — all cut from your <b>${s.n_raw}</b> scans, single writer.
+     Starts from the pretrained FW-GAN weights (generic handwriting) and adapts them toward yours;
+     <b>no other handwriting data is in the dataset.</b>`;
+  renderPlan();
+}
+
+let trainPoll = null;
+$('#trainStart').onclick = async () => {
+  const params = {
+    epochs: +$('#t_epochs').value, batch_size: +$('#t_batch').value, lr: $('#t_lr').value,
+    sample_every: +$('#t_every').value, ckpt_every: +$('#t_every').value,
+    style_ref: $('#t_style').value, sample_text: $('#t_text').value, resume: $('#t_resume').value,
+  };
+  const res = await fetch('/api/train/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params) });
+  if (!res.ok) { alert((await res.json()).detail || 'could not start'); return; }
+  $('#trainStart').disabled = true; $('#trainStop').disabled = false;
+  stepSeen = stepTime = stepRate = null;
+  startTrainPoll();
+};
+$('#trainStop').onclick = async () => {
+  await fetch('/api/train/stop', { method: 'POST' });
+  $('#trainStop').disabled = true;
+};
+// Turn the raw log into something readable at a glance. The log line looks
+// like "[e0 s60] d_loss=0.211 g_loss=26.555 real_ctc=3.074 ..." -- useful, but
+// not while it's scrolling past in a wall of text.
+let stepSeen = null, stepTime = null, stepRate = null;
+function renderTrainStats(s) {
+  const lines = (s.log || '').split('\n');
+  let last = null;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = lines[i].match(/\[e(\d+) s(\d+)\]\s+d_loss=([-\d.]+)\s+g_loss=([-\d.]+)/);
+    if (m) { last = { epoch: +m[1], step: +m[2], d: +m[3], g: +m[4] }; break; }
+  }
+  if (!last) { $('#trainStats').innerHTML = ''; $('#progWrap').style.display = 'none'; return; }
+
+  // measure seconds/step from consecutive polls so the ETA is observed, not guessed
+  const now = Date.now();
+  if (stepSeen !== null && last.step > stepSeen && stepTime) {
+    const r = (now - stepTime) / (last.step - stepSeen) / 1000;
+    stepRate = stepRate === null ? r : stepRate * 0.7 + r * 0.3;
+  }
+  if (stepSeen === null || last.step !== stepSeen) { stepSeen = last.step; stepTime = now; }
+
+  const total = Math.ceil(N_PAIRS / (+$('#t_batch').value || 1)) * (+$('#t_epochs').value || 1);
+  const pct = total ? Math.min(100, 100 * last.step / total) : 0;
+  let eta = '—';
+  if (stepRate && s.running && total > last.step) {
+    const secs = (total - last.step) * stepRate;
+    eta = secs > 3600 ? `${(secs/3600).toFixed(1)} h` : `${Math.round(secs/60)} min`;
+  }
+  $('#progWrap').style.display = 'block';
+  $('#progBar').style.width = pct + '%';
+  $('#progTxt').textContent = `step ${last.step.toLocaleString()} of ${total.toLocaleString()} · ${pct.toFixed(1)}%`;
+  $('#trainStats').innerHTML = `
+    <div class="st"><span>Epoch</span><b>${last.epoch}</b></div>
+    <div class="st"><span>Step</span><b>${last.step.toLocaleString()}</b></div>
+    <div class="st"><span>Generator loss</span><b>${last.g.toFixed(2)}</b></div>
+    <div class="st"><span>Discriminator</span><b>${last.d.toFixed(2)}</b></div>
+    <div class="st"><span>Sec / step</span><b>${stepRate ? stepRate.toFixed(2) : '—'}</b></div>
+    <div class="st"><span>Time left</span><b>${eta}</b></div>`;
+}
+
+$('#logToggle').onclick = () => {
+  const el = $('#trainLog'), on = el.style.display === 'none';
+  el.style.display = on ? 'block' : 'none';
+  $('#logToggle').textContent = on ? 'Hide raw log' : 'Show raw log';
+};
+
+function startTrainPoll() {
+  if (trainPoll) clearInterval(trainPoll);
+  trainPoll = setInterval(async () => {
+    const s = await (await fetch('/api/train/status')).json();
+    $('#trainLog').textContent = s.log;
+    $('#trainLog').scrollTop = $('#trainLog').scrollHeight;
+    $('#trainState').textContent = s.running ? 'training…' : 'stopped';
+    renderTrainStats(s);
+    if (s.latest_sample) {
+      $('#sampleShot').innerHTML = `<img src="/img/samples/${s.latest_sample}?t=${Date.now()}"><div class="muted">${s.latest_sample}</div>`;
+    }
+    if (!s.running) {
+      clearInterval(trainPoll); trainPoll = null;
+      $('#trainStart').disabled = false; $('#trainStop').disabled = true;
+      refreshStatus(); refreshSelects();
+    }
+  }, 2500);
+}
+
+// ---- generate / render ----
+$('#genBtn').onclick = () => {
+  const u = `/api/generate?text=${encodeURIComponent($('#g_text').value)}&style=${encodeURIComponent($('#g_style').value)}&ckpt=${encodeURIComponent($('#g_ckpt').value)}`;
+  $('#wordGallery').innerHTML = ''; $('#pageShot').innerHTML = '';
+  runStream(u, $('#genLog'), async () => {
+    const w = await (await fetch('/api/output_words')).json();
+    $('#wordGallery').innerHTML = w.words.map(n => `<img src="/img/output/${n}?t=${Date.now()}">`).join('');
+  });
+};
+$('#renderBtn').onclick = () => {
+  const fmt = $('#g_fmt').value;
+  const u = `/api/render?text=${encodeURIComponent($('#g_text').value)}&style=${encodeURIComponent($('#g_style').value)}&ckpt=${encodeURIComponent($('#g_ckpt').value)}&fmt=${fmt}`;
+  $('#pageShot').innerHTML = '';
+  runStream(u, $('#genLog'), () => {
+    const name = 'dashboard_page.' + fmt;
+    if (fmt === 'png') {
+      $('#pageShot').innerHTML = `<img src="/img/output/${name}?t=${Date.now()}"><div><a class="dl" href="/file/output/${name}" download>⬇ download PNG</a></div>`;
+    } else {
+      $('#pageShot').innerHTML = `<div><a class="dl" href="/file/output/${name}" download>⬇ download PDF</a></div>`;
+    }
+  });
+};
+
+// ---- boot ----
+refreshStatus().then(loadRawThumbs);
+setInterval(() => { if (!document.hidden) refreshStatus(); }, 6000);
+</script>
+</body>
+</html>
