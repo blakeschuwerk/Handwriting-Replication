@@ -932,6 +932,105 @@ def render(text: str, style: str = "", ckpt: str = "pretrained", fmt: str = "png
     return StreamingResponse(stream_script(args), media_type="text/event-stream")
 
 
+# ---- write on paper --------------------------------------------------------
+# Paper photos live in output/paper (uploads) plus the bundled test page in
+# assets. The test page is deliberately a hard case -- perspective, page bow,
+# uneven lighting, a second page and desk clutter in frame -- so detection
+# regressions show up immediately.
+PAPER = OUTPUT / "paper"
+ASSETS = PROJECT / "assets"
+BUILTIN_PAPER = "test_page.jpg"
+PAPER_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif"}
+_RULING_CACHE = {}
+
+
+def _paper_path(name: str) -> Path:
+    if name == BUILTIN_PAPER:
+        return ASSETS / BUILTIN_PAPER
+    return _safe_under(PAPER, name)
+
+
+@app.get("/api/paper/list")
+def paper_list():
+    PAPER.mkdir(parents=True, exist_ok=True)
+    names = [BUILTIN_PAPER] if (ASSETS / BUILTIN_PAPER).is_file() else []
+    names += sorted(p.name for p in PAPER.iterdir()
+                    if p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+                    and not p.name.startswith("out_"))
+    return {"papers": names, "builtin": BUILTIN_PAPER}
+
+
+@app.post("/api/paper/upload")
+async def paper_upload(files: list[UploadFile] = File(...)):
+    PAPER.mkdir(parents=True, exist_ok=True)
+    saved, rejected = [], []
+    for f in files:
+        ext = Path(f.filename).suffix.lower()
+        if ext not in PAPER_EXTS:
+            rejected.append(f.filename)
+            continue
+        stem = Path(f.filename).stem
+        dest = PAPER / (stem + ext)
+        dest.write_bytes(await f.read())
+        # Browsers can't display HEIC, so normalise on the way in.
+        if ext in {".heic", ".heif"}:
+            jpg = PAPER / (stem + ".jpg")
+            subprocess.run(["sips", "-s", "format", "jpeg", str(dest),
+                            "--out", str(jpg)], capture_output=True)
+            dest.unlink(missing_ok=True)
+            dest = jpg
+        saved.append(dest.name)
+    return {"saved": saved, "rejected": rejected}
+
+
+@app.get("/img/paper/{name}")
+def img_paper(name: str):
+    return FileResponse(_paper_path(name))
+
+
+@app.get("/api/paper/detect")
+def paper_detect(name: str):
+    """Ruled-line geometry for the overlay. Cached on mtime -- detection takes
+    a few seconds and the UI asks for it on every paper switch."""
+    path = _paper_path(name)
+    key = (str(path), path.stat().st_mtime)
+    if key not in _RULING_CACHE:
+        proc = subprocess.run(
+            [PY, str(SCRIPTS / "paper.py"), "--detect-only", "--photo", str(path)],
+            cwd=str(PROJECT), env=_env(), capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            return {"error": (proc.stderr or "detection failed").strip()[-400:]}
+        _RULING_CACHE.clear()  # only ever need the paper being looked at
+        _RULING_CACHE[key] = json.loads(proc.stdout)
+    return _RULING_CACHE[key]
+
+
+@app.get("/api/paper/write")
+def paper_write(name: str, text: str, token: str, style: str = "",
+                ckpt: str = "pretrained", scale: float = 1.05,
+                start_line: int = 0, darkness: float = 0.22, seed: int = 0):
+    PAPER.mkdir(parents=True, exist_ok=True)
+    token = re.sub(r"[^A-Za-z0-9_-]", "", token)[:40] or "run"
+    out = PAPER / f"out_{token}.jpg"
+    args = [
+        str(SCRIPTS / "paper.py"),
+        "--photo", str(_paper_path(name)),
+        "--text", text,
+        "--output", str(out),
+        "--device", "mps",
+        "--scale", str(scale),
+        "--start-line", str(start_line),
+        "--darkness", str(darkness),
+        "--seed", str(seed),
+    ]
+    if style:
+        args += ["--style", str(SEGMENTED / style)]
+    if ckpt and ckpt != "pretrained":
+        args += ["--ckpt", str(CHECKPOINTS / ckpt)]
+    return StreamingResponse(stream_script(args), media_type="text/event-stream")
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("HW_DASH_PORT", "8765"))

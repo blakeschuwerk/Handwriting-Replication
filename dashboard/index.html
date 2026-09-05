@@ -286,6 +286,7 @@
   <button data-tab="package">3 · Build Dataset</button>
   <button data-tab="train">4 · Train</button>
   <button data-tab="generate">5 · Generate &amp; Render</button>
+  <button data-tab="paper">6 · Write on Paper</button>
 </nav>
 
 <main>
@@ -474,6 +475,45 @@
       <div class="bigshot" id="pageShot"></div>
     </div>
   </section>
+
+  <section class="tab" id="tab-paper">
+    <div class="card">
+      <h2>Write on your own paper</h2>
+      <p class="sub">Photograph a page of ruled paper, type what you want, and it gets written onto that page in your handwriting &mdash; following the paper's real lines, perspective and lighting. <b>Tab</b> indents, <b>Enter</b> starts a new line, and long lines wrap at the margin.</p>
+
+      <div class="row">
+        <label class="fld"><span>Paper photo</span><select id="p_paper"></select></label>
+        <label class="fld"><span>Upload a photo (HEIC fine)</span><input type="file" id="p_file" accept=".jpg,.jpeg,.png,.heic,.heif" multiple></label>
+      </div>
+
+      <div id="p_preview" style="position:relative;display:inline-block;max-width:100%">
+        <img id="p_img" alt="paper" style="max-width:100%;border-radius:8px;display:block">
+        <canvas id="p_ov" style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none"></canvas>
+      </div>
+      <div class="flex" style="margin-top:8px;align-items:center">
+        <label style="font-size:12px;color:var(--muted)"><input type="checkbox" id="p_showlines" checked> show the lines it found</label>
+        <span class="muted" id="p_detinfo" style="font-size:12px"></span>
+      </div>
+
+      <label class="fld"><span>Text</span><textarea id="p_text" rows="6" spellcheck="false">Operations management is the administration of business practices to create the highest level of efficiency possible.
+	It converts materials and labor into goods and services as efficiently as possible.</textarea></label>
+
+      <div class="row">
+        <label class="fld"><span>Start on line</span><input type="number" id="p_start" value="0" min="0"></label>
+        <label class="fld"><span>Size (&times; line spacing)</span><input type="number" id="p_scale" value="1.05" step="0.05" min="0.4" max="2.5"></label>
+        <label class="fld"><span>Darkness</span><input type="number" id="p_dark" value="0.22" step="0.02" min="0" max="1"></label>
+        <label class="fld"><span>Seed</span><input type="number" id="p_seed" value="0"></label>
+      </div>
+      <div class="row">
+        <label class="fld"><span>Style reference crop</span><select id="p_style"></select></label>
+        <label class="fld"><span>Model</span><select id="p_ckpt"></select></label>
+      </div>
+
+      <div class="flex"><button class="btn" id="paperBtn">Write it</button></div>
+      <pre class="log" id="paperLog" style="display:none"></pre>
+      <div class="bigshot" id="paperShot"></div>
+    </div>
+  </section>
 </main>
 
 <!-- ===================== BOX EDITOR OVERLAY ===================== -->
@@ -517,6 +557,7 @@ $$('#nav button').forEach(b => b.onclick = () => {
   if (b.dataset.tab === 'boxes') loadPages();
   if (b.dataset.tab === 'package') loadDatasetPages();
   if (b.dataset.tab === 'train' || b.dataset.tab === 'generate') refreshSelects();
+  if (b.dataset.tab === 'paper') { refreshSelects(); loadPapers(); }
   if (b.dataset.tab === 'train') setTimeout(syncPadFromFields, 30);
 });
 
@@ -561,7 +602,7 @@ async function refreshSelects() {
   const s = window._status || await refreshStatus();
   // style crop dropdowns (from crops)
   const crops = (await (await fetch('/api/crops')).json()).crops.map(c => c.name);
-  for (const id of ['#t_style', '#g_style']) {
+  for (const id of ['#t_style', '#g_style', '#p_style']) {
     const sel = $(id); const cur = sel.value;
     sel.innerHTML = crops.map(c => `<option value="${c}">${c}</option>`).join('') || '<option value="">(no crops yet)</option>';
     if (crops.includes(cur)) sel.value = cur;
@@ -569,9 +610,12 @@ async function refreshSelects() {
   // model dropdown
   const opts = ['<option value="pretrained">Pretrained (generic)</option>'];
   (s.checkpoints || []).forEach(c => opts.push(`<option value="${c}">Fine-tuned · ${c}</option>`));
-  const g = $('#g_ckpt'); const cur = g.value; g.innerHTML = opts.join('');
-  if ([...g.options].some(o => o.value === cur)) g.value = cur;
-  else if (s.has_finetuned) g.value = 'latest.pth';
+  for (const id of ['#g_ckpt', '#p_ckpt']) {
+    const g = $(id); if (!g) continue;
+    const cur = g.value; g.innerHTML = opts.join('');
+    if ([...g.options].some(o => o.value === cur)) g.value = cur;
+    else if (s.has_finetuned) g.value = 'latest.pth';
+  }
 }
 
 // ---- upload ----
@@ -1362,6 +1406,91 @@ $('#renderBtn').onclick = () => {
 // ---- boot ----
 refreshStatus().then(loadRawThumbs);
 setInterval(() => { if (!document.hidden) refreshStatus(); }, 6000);
+
+// ---- 6 · write on paper ----------------------------------------------------
+let paperGeom = null;
+
+async function loadPapers() {
+  const d = await (await fetch('/api/paper/list')).json();
+  const sel = $('#p_paper'), cur = sel.value;
+  sel.innerHTML = (d.papers || []).map(n =>
+    `<option value="${n}">${n === d.builtin ? n + '  (built-in test page)' : n}</option>`).join('');
+  if ((d.papers || []).includes(cur)) sel.value = cur;
+  await showPaper();
+}
+
+async function showPaper() {
+  const n = $('#p_paper').value;
+  if (!n) { $('#p_detinfo').textContent = 'no paper photos yet — upload one'; return; }
+  $('#p_img').src = '/img/paper/' + encodeURIComponent(n);
+  paperGeom = null; drawRules();
+  $('#p_detinfo').textContent = 'finding the ruled lines…';
+  const g = await (await fetch('/api/paper/detect?name=' + encodeURIComponent(n))).json();
+  if (g.error) { $('#p_detinfo').textContent = 'could not find ruled lines: ' + g.error; return; }
+  paperGeom = g;
+  $('#p_detinfo').textContent = `${g.count} ruled lines · spacing ${g.spacing}px`;
+  $('#p_start').max = Math.max(0, g.count - 1);
+  drawRules();
+}
+
+function drawRules() {
+  const img = $('#p_img'), cv = $('#p_ov');
+  if (!img || !img.clientWidth) return;
+  cv.width = img.clientWidth; cv.height = img.clientHeight;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!paperGeom || !$('#p_showlines').checked) return;
+  const sx = cv.width / paperGeom.size[0], sy = cv.height / paperGeom.size[1];
+  ctx.strokeStyle = 'rgba(80,220,150,.9)'; ctx.lineWidth = 1.2;
+  for (const L of paperGeom.lines) {
+    ctx.beginPath();
+    L.pts.forEach((q, i) => i ? ctx.lineTo(q[0] * sx, q[1] * sy) : ctx.moveTo(q[0] * sx, q[1] * sy));
+    ctx.stroke();
+  }
+}
+
+$('#p_paper').onchange = showPaper;
+$('#p_showlines').onchange = drawRules;
+$('#p_img').onload = drawRules;
+window.addEventListener('resize', drawRules);
+
+$('#p_file').onchange = async (e) => {
+  const fd = new FormData();
+  [...e.target.files].forEach(f => fd.append('files', f));
+  $('#p_detinfo').textContent = 'uploading…';
+  const r = await (await fetch('/api/paper/upload', { method: 'POST', body: fd })).json();
+  e.target.value = '';
+  await loadPapers();
+  if (r.saved && r.saved.length) { $('#p_paper').value = r.saved[0]; await showPaper(); }
+};
+
+// Tab indents instead of moving focus: this textarea is a writing surface.
+$('#p_text').addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab') return;
+  e.preventDefault();
+  const t = e.target, a = t.selectionStart, b = t.selectionEnd;
+  t.value = t.value.slice(0, a) + '\t' + t.value.slice(b);
+  t.selectionStart = t.selectionEnd = a + 1;
+});
+
+$('#paperBtn').onclick = () => {
+  if (!$('#p_paper').value) { alert('Pick or upload a paper photo first.'); return; }
+  const token = Date.now().toString(36);
+  const q = new URLSearchParams({
+    name: $('#p_paper').value, text: $('#p_text').value, token,
+    style: $('#p_style').value || '', ckpt: $('#p_ckpt').value || 'pretrained',
+    scale: $('#p_scale').value, start_line: $('#p_start').value,
+    darkness: $('#p_dark').value, seed: $('#p_seed').value,
+  });
+  $('#paperShot').innerHTML = '';
+  $('#paperBtn').disabled = true;
+  runStream('/api/paper/write?' + q, $('#paperLog'), (rc) => {
+    $('#paperBtn').disabled = false;
+    if (rc === '0') $('#paperShot').innerHTML =
+      `<img src="/img/paper/out_${token}.jpg?t=${Date.now()}" style="max-width:100%;border-radius:8px">`;
+  });
+};
+
 </script>
 </body>
 </html>

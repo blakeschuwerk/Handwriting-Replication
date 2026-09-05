@@ -308,7 +308,7 @@ def parse_text(text):
 
 
 def layout(tokens, widths_at, ruling, start_line=0, scale=1.05,
-           space_em=0.28, tab_em=2.0):
+           space_em=0.28, tab_em=0.6):
     """Greedy line-breaking onto the detected rules.
 
     widths_at(i, height) -> pixel width of word i drawn at that canvas height.
@@ -332,7 +332,7 @@ def layout(tokens, widths_at, ruling, start_line=0, scale=1.05,
             h = g["spacing"] * scale
             x = g["x0"]
         if tabs:
-            x += tabs * tab_em * h * space_em / 0.28 * 0.5
+            x += tabs * tab_em * h
         w = widths_at(wi, h)
         if not first and nl == 0 and x + w > g["x1"]:
             li += 1
@@ -398,14 +398,30 @@ def compose(bgr, ruling, placements, word_paths, darkness=0.22, jitter=0.05, see
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
+def ruling_json(ruling, n_points=24):
+    """Rule polylines for the UI overlay, so detection is checkable by eye."""
+    lines = []
+    for i in range(len(ruling["rules"])):
+        g = line_geometry(ruling, i)
+        xs = np.linspace(g["x0"], g["x1"], n_points)
+        lines.append({"i": i, "pts": [[round(float(x), 1), round(g["y"](x), 1)] for x in xs]})
+    return {"lines": lines, "spacing": round(ruling["spacing"], 1),
+            "count": len(lines), "size": list(ruling["size"])}
+
+
 def write_on_paper(photo_path, text, out_path, style=None, ckpt=None,
                    device="mps", scale=1.05, start_line=0, darkness=0.22, seed=0):
     """Full pipeline: photo + text -> composited image."""
+    print(f"[paper] reading {os.path.basename(photo_path)}", flush=True)
     img = load_photo(photo_path)
+    print(f"[paper] {img.shape[1]}x{img.shape[0]}, finding the ruling...", flush=True)
     ruling = detect_ruling(img)
+    print(f"[paper] {len(ruling['rules'])} ruled lines, spacing {ruling['spacing']:.1f}px",
+          flush=True)
     tokens = parse_text(text)
     if not tokens:
         raise ValueError("no text to write")
+    print(f"[paper] generating {len(tokens)} words...", flush=True)
     paths = generate_words([t[0] for t in tokens], style=style, ckpt=ckpt, device=device)
     natural = [Image.open(p).size for p in paths]
 
@@ -414,18 +430,50 @@ def write_on_paper(photo_path, text, out_path, style=None, ckpt=None,
         return w * h / hh
 
     pl = layout(tokens, widths_at, ruling, start_line=start_line, scale=scale)
+    if len(pl) < len(tokens):
+        print(f"[paper] WARNING: ran out of ruled lines -- "
+              f"{len(tokens) - len(pl)} word(s) did not fit", flush=True)
+    print(f"[paper] compositing {len(pl)} words", flush=True)
     out = compose(img, ruling, pl, paths, darkness=darkness, seed=seed)
-    cv2.imwrite(out_path, out, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    ext = os.path.splitext(out_path)[1].lower()
+    cv2.imwrite(out_path, out,
+                [cv2.IMWRITE_JPEG_QUALITY, 92] if ext in (".jpg", ".jpeg") else [])
+    print(f"[paper] wrote {out_path}", flush=True)
     return {"out": out_path, "placed": len(pl), "of": len(tokens),
             "rules": len(ruling["rules"]), "spacing": ruling["spacing"]}
 
 
+def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="Write generated handwriting onto ruled paper.")
+    ap.add_argument("--photo", default=TEST_PAGE)
+    ap.add_argument("--text")
+    ap.add_argument("--output")
+    ap.add_argument("--style", nargs="*", default=None)
+    ap.add_argument("--ckpt", default=None)
+    ap.add_argument("--device", default="mps")
+    ap.add_argument("--scale", type=float, default=1.05,
+                    help="word height as a multiple of the line spacing")
+    ap.add_argument("--start-line", type=int, default=0)
+    ap.add_argument("--darkness", type=float, default=0.22,
+                    help="0 = black ink, 1 = invisible")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--detect-only", action="store_true",
+                    help="print the ruling geometry as JSON and exit")
+    a = ap.parse_args()
+
+    if a.detect_only:
+        import json
+        print(json.dumps(ruling_json(detect_ruling(load_photo(a.photo)))))
+        return
+    if not a.text or not a.output:
+        ap.error("--text and --output are required unless --detect-only")
+
+    r = write_on_paper(a.photo, a.text, a.output, style=a.style, ckpt=a.ckpt,
+                       device=a.device, scale=a.scale, start_line=a.start_line,
+                       darkness=a.darkness, seed=a.seed)
+    print(f"[paper] done: placed {r['placed']}/{r['of']} words on {r['rules']} lines")
+
+
 if __name__ == "__main__":
-    src = sys.argv[1] if len(sys.argv) > 1 else TEST_PAGE
-    txt = sys.argv[2] if len(sys.argv) > 2 else (
-        "the quick brown fox jumps over the lazy dog\n"
-        "\tthis line is indented with a tab\n"
-        "and this one wraps because it is quite a lot longer than the others are"
-    )
-    dst = sys.argv[3] if len(sys.argv) > 3 else "/tmp/paper_out.jpg"
-    print(write_on_paper(src, txt, dst))
+    main()
