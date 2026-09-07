@@ -366,53 +366,6 @@ def detect_sheet(bgr):
     return sheet, obs, info
 
 
-def detect_ruling(bgr):
-    """Locate the ruled writing area in photo space."""
-    H, W = bgr.shape[:2]
-    flat = _flat_response(bgr)
-    spacing = _estimate_spacing(flat[:, W // 2 - 100:W // 2 + 100].mean(axis=1))
-    if not spacing:
-        raise ValueError("no ruling detected -- is the paper ruled in blue?")
-    rules = _consistent_run(_track_rules(flat, spacing))
-    if len(rules) < 4:
-        raise ValueError(f"only {len(rules)} rules found")
-
-    ex = [_extent(flat, r) for r in rules]
-    ok = [i for i, e in enumerate(ex) if e]
-    if len(ok) < 4:
-        raise ValueError("could not measure the width of the ruled area")
-    idx = np.array(ok, float)
-    la, lb = _robust_line(idx, np.array([ex[i][0] for i in ok]))
-    ra, rb = _robust_line(idx, np.array([ex[i][1] for i in ok]))
-
-    return {
-        "rules": rules,
-        "spacing": float(np.median(np.diff([r["yc"] for r in rules]))),
-        "left": (la, lb),
-        "right": (ra, rb),
-        "size": (W, H),
-    }
-
-
-def line_geometry(ruling, i):
-    """Left/right x, baseline y at a given x, tilt, and local line spacing."""
-    r = ruling["rules"][i]
-    la, lb = ruling["left"]
-    ra, rb = ruling["right"]
-    x0, x1 = la * i + lb, ra * i + rb
-    nb = ruling["rules"][i + 1] if i + 1 < len(ruling["rules"]) else None
-    pv = ruling["rules"][i - 1] if i > 0 else None
-    local = (nb["yc"] - r["yc"]) if nb else (r["yc"] - pv["yc"])
-    poly = np.asarray(r["poly"])
-    slope = np.polyder(poly)
-    return {
-        "x0": x0, "x1": x1,
-        "y": lambda x: float(np.polyval(poly, x)),
-        "deg_at": lambda x: math.degrees(math.atan(float(np.polyval(slope, x)))),
-        "spacing": float(local),
-    }
-
-
 # ---------------------------------------------------------------------------
 # Generating the words
 # ---------------------------------------------------------------------------
@@ -467,45 +420,44 @@ def parse_text(text):
     return out
 
 
-def layout(tokens, widths_at, ruling, start_line=0, scale=1.05,
+def layout(tokens, aspects, sheet, start_line=0, scale=1.05,
            space_em=0.28, tab_em=0.6):
-    """Greedy line-breaking onto the detected rules.
+    """Greedy line breaking, done entirely in page space.
 
-    widths_at(i, height) -> pixel width of word i drawn at that canvas height.
-    Word size follows each rule's *local* spacing, so text further up the page
-    is drawn smaller and the perspective stays honest.
+    Because one unit of u equals one line height, a word's page-space width is
+    just ``aspect * scale`` -- it does not depend on which line the word lands
+    on. That is what lets breaks be decided before knowing the answer, and it
+    is why the u scale was fixed the way it was.
+
+    Words past the last rule are kept and marked, never dropped: losing text
+    silently is worse than showing it as overflow.
     """
     placements = []
-    n_rules = len(ruling["rules"])
-    li = start_line
-    g = line_geometry(ruling, li)
-    h = g["spacing"] * scale
-    x = g["x0"]
+    first_line = sheet.i_first + start_line
+    last_line = sheet.i_first + sheet.n_lines - 1
+    li = first_line
+    u = sheet.u_left
     first = True
 
     for wi, (word, nl, tabs) in enumerate(tokens):
         if nl and not first:
             li += nl
-            if li >= n_rules:
-                break
-            g = line_geometry(ruling, li)
-            h = g["spacing"] * scale
-            x = g["x0"]
+            u = sheet.u_left
         if tabs:
-            x += tabs * tab_em * h
-        w = widths_at(wi, h)
-        if not first and nl == 0 and x + w > g["x1"]:
+            u += tabs * tab_em * scale
+        w = aspects[wi] * scale
+        if not first and nl == 0 and u + w > sheet.u_right:
             li += 1
-            if li >= n_rules:
-                break
-            g = line_geometry(ruling, li)
-            h = g["spacing"] * scale
-            x = g["x0"]
-            w = widths_at(wi, h)
-        placements.append({"wi": wi, "line": li, "x": float(x),
-                           "h": float(h), "w": float(w)})
-        x += w + h * space_em
+            u = sheet.u_left
         first = False
+        if li > last_line:
+            placements.append({"wi": wi, "line": li, "u": float(u),
+                               "w": float(w), "overflow": True})
+            u += w + space_em * scale
+            continue
+        placements.append({"wi": wi, "line": li, "u": float(u),
+                           "w": float(w), "overflow": False})
+        u += w + space_em * scale
     return placements
 
 
@@ -513,7 +465,8 @@ def layout(tokens, widths_at, ruling, start_line=0, scale=1.05,
 # Compositing
 # ---------------------------------------------------------------------------
 
-def compose(bgr, ruling, placements, word_paths, darkness=0.22, jitter=0.05, seed=0):
+def compose(bgr, sheet, placements, word_paths, scale=1.05,
+            darkness=0.22, jitter=0.05, seed=0):
     """Alpha-composite each word onto its rule.
 
     Darkening rather than painting a flat colour: the paper keeps its own
@@ -525,14 +478,16 @@ def compose(bgr, ruling, placements, word_paths, darkness=0.22, jitter=0.05, see
     H, W = out.shape[:2]
 
     for p in placements:
-        g = line_geometry(ruling, p["line"])
+        if p.get("overflow"):
+            continue
+        line, u = p["line"], p["u"]
+        h_px = sheet.spacing_px(line, u) * scale
         alpha = ink_alpha(Image.open(word_paths[p["wi"]]))
-        h = max(4, int(round(p["h"])))
+        h = max(4, int(round(h_px)))
         w = max(2, int(round(alpha.width * h / alpha.height)))
         a = np.asarray(alpha.resize((w, h), Image.LANCZOS), np.float32) / 255.0
 
-        cx = p["x"] + p["w"] / 2
-        ang = g["deg_at"](cx)  # local tangent, so each word follows the page bow
+        ang = sheet.tangent_deg(line, u + p["w"] / 2)
         if abs(ang) > 0.05:
             d = math.radians(ang)
             nw = int(abs(w * math.cos(d)) + abs(h * math.sin(d))) + 2
@@ -540,13 +495,13 @@ def compose(bgr, ruling, placements, word_paths, darkness=0.22, jitter=0.05, see
             M = cv2.getRotationMatrix2D((w / 2, h / 2), -ang, 1.0)
             M[0, 2] += nw / 2 - w / 2
             M[1, 2] += nh / 2 - h / 2
-            a = cv2.warpAffine(a, M, (nw, nh), flags=cv2.INTER_LINEAR,
-                               borderValue=0.0)
+            a = cv2.warpAffine(a, M, (nw, nh), flags=cv2.INTER_LINEAR, borderValue=0.0)
             w, h = nw, nh
 
-        base = g["y"](cx) + rng.uniform(-jitter, jitter) * p["h"]
-        x0 = int(round(p["x"]))
-        y0 = int(round(base - BASELINE_FRAC * p["h"] - (h - p["h"]) / 2))
+        bx, by = sheet.point(line, u)
+        by += rng.uniform(-jitter, jitter) * h_px
+        x0 = int(round(bx))
+        y0 = int(round(by - BASELINE_FRAC * h_px - (h - h_px) / 2))
 
         sx0, sy0 = max(0, x0), max(0, y0)
         sx1, sy1 = min(W, x0 + w), min(H, y0 + h)
@@ -558,15 +513,38 @@ def compose(bgr, ruling, placements, word_paths, darkness=0.22, jitter=0.05, see
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def ruling_json(ruling, n_points=24):
-    """Rule polylines for the UI overlay, so detection is checkable by eye."""
+def sheet_json(sheet, response=None, n_points=24):
+    """Everything the UI needs to draw and manipulate the sheet."""
     lines = []
-    for i in range(len(ruling["rules"])):
-        g = line_geometry(ruling, i)
-        xs = np.linspace(g["x0"], g["x1"], n_points)
-        lines.append({"i": i, "pts": [[round(float(x), 1), round(g["y"](x), 1)] for x in xs]})
-    return {"lines": lines, "spacing": round(ruling["spacing"], 1),
-            "count": len(lines), "size": list(ruling["size"])}
+    for k in range(sheet.n_lines):
+        i = sheet.i_first + k
+        pts = sheet.polyline(i, n_points)
+        lines.append({"i": int(i),
+                      "pts": [[round(float(x), 1), round(float(y), 1)] for x, y in pts]})
+
+    def guide(u):
+        ii = np.linspace(sheet.i_first, sheet.i_first + sheet.n_lines - 1, n_points)
+        x, y = sheet.xy(ii, np.full(n_points, float(u)))
+        return [[round(float(a), 1), round(float(b), 1)] for a, b in zip(x, y)]
+
+    i0, i1 = sheet.i_first, sheet.i_first + sheet.n_lines - 1
+    corners = [sheet.point(i0, sheet.u_left), sheet.point(i0, sheet.u_right),
+               sheet.point(i1, sheet.u_right), sheet.point(i1, sheet.u_left)]
+    out = {
+        "sheet": sheet.to_json(),
+        "lines": lines,
+        "margin": guide(0.0),
+        "right": guide(sheet.u_right),
+        "quad": [[round(x, 1), round(y, 1)] for x, y in corners],
+        "count": sheet.n_lines,
+        "i_first": sheet.i_first,
+        "spacing": round(sheet.spacing_px(i0 + sheet.n_lines // 2,
+                                          (sheet.u_left + sheet.u_right) / 2), 1),
+        "size": list(sheet.size),
+    }
+    if response is not None:
+        out["confidence"] = [round(c, 3) for c in _sheet.line_confidence(sheet, response)]
+    return out
 
 
 def write_on_paper(photo_path, text, out_path, style=None, ckpt=None,
@@ -575,32 +553,30 @@ def write_on_paper(photo_path, text, out_path, style=None, ckpt=None,
     print(f"[paper] reading {os.path.basename(photo_path)}", flush=True)
     img = load_photo(photo_path)
     print(f"[paper] {img.shape[1]}x{img.shape[0]}, finding the ruling...", flush=True)
-    ruling = detect_ruling(img)
-    print(f"[paper] {len(ruling['rules'])} ruled lines, spacing {ruling['spacing']:.1f}px",
-          flush=True)
+    sheet, _obs, info = detect_sheet(img)
+    print(f"[paper] {sheet.n_lines} ruled lines, spacing "
+          f"{sheet.spacing_px(sheet.i_first + sheet.n_lines // 2, sheet.u_right / 2):.1f}px"
+          + (f", grew {info['grown']}" if info.get("grown") else ""), flush=True)
     tokens = parse_text(text)
     if not tokens:
         raise ValueError("no text to write")
     print(f"[paper] generating {len(tokens)} words...", flush=True)
     paths = generate_words([t[0] for t in tokens], style=style, ckpt=ckpt, device=device)
-    natural = [Image.open(p).size for p in paths]
+    aspects = [w / h for w, h in (Image.open(p).size for p in paths)]
 
-    def widths_at(i, h):
-        w, hh = natural[i]
-        return w * h / hh
-
-    pl = layout(tokens, widths_at, ruling, start_line=start_line, scale=scale)
-    if len(pl) < len(tokens):
-        print(f"[paper] WARNING: ran out of ruled lines -- "
-              f"{len(tokens) - len(pl)} word(s) did not fit", flush=True)
-    print(f"[paper] compositing {len(pl)} words", flush=True)
-    out = compose(img, ruling, pl, paths, darkness=darkness, seed=seed)
+    pl = layout(tokens, aspects, sheet, start_line=start_line, scale=scale)
+    over = sum(1 for p in pl if p["overflow"])
+    if over:
+        print(f"[paper] WARNING: {over} word(s) ran past the last ruled line",
+              flush=True)
+    print(f"[paper] compositing {len(pl) - over} words", flush=True)
+    out = compose(img, sheet, pl, paths, scale=scale, darkness=darkness, seed=seed)
     ext = os.path.splitext(out_path)[1].lower()
     cv2.imwrite(out_path, out,
                 [cv2.IMWRITE_JPEG_QUALITY, 92] if ext in (".jpg", ".jpeg") else [])
     print(f"[paper] wrote {out_path}", flush=True)
-    return {"out": out_path, "placed": len(pl), "of": len(tokens),
-            "rules": len(ruling["rules"]), "spacing": ruling["spacing"]}
+    return {"out": out_path, "placed": len(pl) - over, "of": len(tokens),
+            "rules": sheet.n_lines}
 
 
 def main():
@@ -624,7 +600,9 @@ def main():
 
     if a.detect_only:
         import json
-        print(json.dumps(ruling_json(detect_ruling(load_photo(a.photo)))))
+        img = load_photo(a.photo)
+        sh, _o, _i = detect_sheet(img)
+        print(json.dumps(sheet_json(sh, _flat_response(img))))
         return
     if not a.text or not a.output:
         ap.error("--text and --output are required unless --detect-only")
