@@ -350,6 +350,23 @@ def pin(doc, ids, line, u, sheet=None, opts=None):
     return len(sel)
 
 
+def place_pins(doc):
+    """Apply pins to positions without reflowing anything else.
+
+    Dragging must not disturb the rest of the paragraph -- that is the whole
+    point of dragging as opposed to editing text. Reflow is reserved for
+    operations that change the text, where a word processor would reflow too.
+    """
+    n = 0
+    for w in doc["words"]:
+        p = w.get("pin")
+        if p:
+            w["placed"] = {"line": int(p["line"]), "u": float(p["u"])}
+            w["overflow"] = False
+            n += 1
+    return n
+
+
 def unpin(doc, ids):
     n = 0
     wanted = set(ids)

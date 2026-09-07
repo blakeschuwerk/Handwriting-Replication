@@ -992,6 +992,7 @@ def img_paper(name: str):
 # sheet on every handle drag and a process launch alone would blow the budget.
 sys.path.insert(0, str(SCRIPTS))
 import paper as _paper          # noqa: E402
+import render_page as _render_page  # noqa: E402
 import sheet as _sheetmod       # noqa: E402
 
 _PAPER = {}   # name -> {sheet, obs, flat, mtime}
@@ -1115,6 +1116,237 @@ def paper_write(name: str, text: str, token: str, style: str = "",
     if ckpt and ckpt != "pretrained":
         args += ["--ckpt", str(CHECKPOINTS / ckpt)]
     return StreamingResponse(stream_script(args), media_type="text/event-stream")
+
+
+# ---- editable document -----------------------------------------------------
+# All page geometry stays on this side. The browser receives each word already
+# placed in photo pixels and sends back pixel positions; it never reimplements
+# the sheet maths, so there is only one definition of where a word goes.
+import doc as _doc          # noqa: E402
+
+DOCS = OUTPUT / "paper" / "docs"
+WORDS = OUTPUT / "paper" / "words"
+
+
+def _doc_path(name):
+    DOCS.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+    return DOCS / f"{safe}.json"
+
+
+def _doc_style(document):
+    st = document.get("style") or {}
+    crop = st.get("crop")
+    ckpt = st.get("ckpt")
+    return (str(SEGMENTED / crop) if crop else None,
+            str(CHECKPOINTS / ckpt) if ckpt and ckpt != "pretrained" else None)
+
+
+def _load_doc(name, sheet):
+    path = _doc_path(name)
+    if path.exists():
+        try:
+            return _doc.load(str(path))
+        except Exception:
+            pass
+    return _doc.new_doc(name, sheet)
+
+
+def doc_view(document, sheet):
+    """The document as the browser needs it: words placed in photo pixels."""
+    o = dict(_doc.DEFAULTS)
+    o.update(document.get("opts") or {})
+    hp = _doc.humanize_params(o["humanize"])
+    words = []
+    for w in sorted(document["words"], key=lambda d: d["ord"]):
+        p = w.get("placed")
+        item = {"id": w["id"], "text": w["text"], "pinned": bool(w.get("pin")),
+                "overflow": bool(w.get("overflow")), "clipped": bool(w.get("clipped")),
+                "png": os.path.basename(w["png"]) if w.get("png") else None}
+        if p and not w.get("overflow"):
+            size = 1.0 + (_doc.word_unit(document, w["id"], "size") * 2 - 1) * hp["size_sd"]
+            h = sheet.spacing_px(p["line"], p["u"]) * o["scale"] * w.get("scale", 1.0) * size
+            asp = w.get("aspect") or 3.0
+            bx, by = sheet.point(p["line"], p["u"])
+            by += _doc.baseline_drift(document, p["line"], p["u"], hp["baseline"]) * h
+            slant = (_doc.word_unit(document, w["id"], "slant") * 2 - 1) * hp["slant_sd"]
+            item.update({
+                "line": p["line"], "u": round(p["u"], 4),
+                "x": round(bx, 1), "y": round(by - 0.907 * h, 1),
+                "w": round(asp * h, 1), "h": round(h, 1),
+                "deg": round(sheet.tangent_deg(p["line"], p["u"] + asp * o["scale"] / 2)
+                             + slant + w.get("slant", 0.0), 3),
+            })
+        words.append(item)
+    return {"words": words, "opts": o, "text": document.get("text", ""),
+            "style": document.get("style"), "seed": document.get("seed"),
+            "overflow": sum(1 for w in words if w["overflow"])}
+
+
+def _rebuild_text(document):
+    """Reconstruct the source text after words were deleted on the canvas."""
+    out = []
+    for w in sorted(document["words"], key=lambda d: d["ord"]):
+        if w["nl"] and out:
+            out.append("\n" + "\t" * w["tabs"])
+        elif w["tabs"] and not out:
+            out.append("\t" * w["tabs"])
+        elif out and not out[-1].endswith("\n") and not out[-1].endswith("\t"):
+            out.append(" ")
+        out.append(w["text"])
+    return "".join(out)
+
+
+def _sync_and_reflow(name, document, sheet, generate=True, log=None):
+    style, ckpt = _doc_style(document)
+    if generate:
+        _doc.ensure_words(document, str(WORDS), style=style, ckpt=ckpt, log=log)
+    stats = _doc.reflow(document, sheet)
+    _doc.save(str(_doc_path(name)), document)
+    return stats
+
+
+@app.get("/api/doc")
+def doc_get(name: str):
+    try:
+        st = _paper_state(name)
+    except Exception as exc:
+        return {"error": str(exc)[:400]}
+    document = _load_doc(name, st["sheet"])
+    document["sheet"] = st["sheet"].to_json()
+    _doc.reflow(document, st["sheet"])
+    return doc_view(document, st["sheet"])
+
+
+@app.post("/api/doc/text")
+async def doc_text(payload: dict):
+    name = payload.get("name")
+    try:
+        st = _paper_state(name)
+    except Exception as exc:
+        return {"error": str(exc)[:400]}
+    document = _load_doc(name, st["sheet"])
+    if payload.get("style"):
+        document["style"] = payload["style"]
+    if payload.get("opts"):
+        document.setdefault("opts", {}).update(payload["opts"])
+    _doc.sync_text(document, payload.get("text", ""))
+    try:
+        _sync_and_reflow(name, document, st["sheet"])
+    except Exception as exc:
+        return {"error": str(exc)[:600]}
+    return doc_view(document, st["sheet"])
+
+
+@app.post("/api/doc/edit")
+async def doc_edit(payload: dict):
+    name = payload.get("name")
+    op = payload.get("op")
+    ids = payload.get("ids") or []
+    try:
+        st = _paper_state(name)
+    except Exception as exc:
+        return {"error": str(exc)[:400]}
+    sheet = st["sheet"]
+    document = _load_doc(name, sheet)
+    regen = False
+    # Dragging moves what you grabbed and nothing else; only operations that
+    # change the text reflow the page, the way a word processor does.
+    reflow_ops = {"unpin", "delete", "retext", "opts"}
+
+    if op == "pin":
+        u, v = sheet.uv(float(payload["x"]), float(payload["y"]))
+        _doc.pin(document, ids, int(round(float(v[0]))), float(u[0]))
+    elif op == "nudge":
+        # a pixel delta means nothing to the model; convert it on this side
+        mid = sheet.i_first + sheet.n_lines // 2
+        x0, y0 = sheet.point(mid, sheet.u_right / 2)
+        u0, v0 = sheet.uv(x0, y0)
+        u1, v1 = sheet.uv(x0 + float(payload.get("dx", 0)),
+                          y0 + float(payload.get("dy", 0)))
+        for w in document["words"]:
+            if w["id"] in set(ids) and not w.get("pin") and w.get("placed"):
+                w["pin"] = {"line": w["placed"]["line"], "u": w["placed"]["u"], "group": None}
+        _doc.move_pins(document, ids, 0, float(u1[0] - u0[0]))
+        if payload.get("dline"):
+            _doc.move_pins(document, ids, int(payload["dline"]), 0.0)
+    elif op == "unpin":
+        _doc.unpin(document, ids)
+    elif op == "reroll":
+        _doc.reroll(document, ids)
+        regen = True
+    elif op == "delete":
+        wanted = set(ids)
+        document["words"] = [w for w in document["words"] if w["id"] not in wanted]
+        for k, w in enumerate(sorted(document["words"], key=lambda d: d["ord"])):
+            w["ord"] = k
+        document["text"] = _rebuild_text(document)
+    elif op == "opts":
+        document.setdefault("opts", {}).update(payload.get("opts") or {})
+    elif op == "retext":
+        new = (payload.get("text") or "").strip()
+        for w in document["words"]:
+            if w["id"] in set(ids) and new:
+                w["text"] = new.split()[0]
+                w["png"] = None
+                w["aspect"] = None
+        document["text"] = _rebuild_text(document)
+        regen = True
+    else:
+        return {"error": f"unknown op {op!r}"}
+
+    try:
+        if op in reflow_ops:
+            _sync_and_reflow(name, document, sheet, generate=regen)
+        else:
+            style, ckpt = _doc_style(document)
+            if regen:
+                _doc.ensure_words(document, str(WORDS), style=style, ckpt=ckpt)
+            _doc.place_pins(document)
+            _doc.save(str(_doc_path(name)), document)
+    except Exception as exc:
+        return {"error": str(exc)[:600]}
+    return doc_view(document, sheet)
+
+
+@app.get("/img/word/{fname}")
+def img_word(fname: str):
+    """A word as a real alpha image, for the browser to composite live.
+
+    First endpoint in this project to serve an alpha channel -- everything else
+    is opaque. ink_alpha() already computes exactly this mask; it was previously
+    consumed in-process and thrown away.
+    """
+    from PIL import Image
+    src = _safe_under(WORDS, fname)
+    im = Image.open(src)
+    buf = io.BytesIO()
+    Image.merge("LA", (im.convert("L"), _render_page.ink_alpha(im))).save(buf, "PNG")
+    return Response(buf.getvalue(), media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+@app.post("/api/doc/render")
+async def doc_render(payload: dict):
+    name = payload.get("name")
+    try:
+        st = _paper_state(name)
+    except Exception as exc:
+        return {"error": str(exc)[:400]}
+    document = _load_doc(name, st["sheet"])
+    try:
+        _sync_and_reflow(name, document, st["sheet"])
+    except Exception as exc:
+        return {"error": str(exc)[:600]}
+    import cv2
+    img = _paper.load_photo(str(_paper_path(name)))
+    out, drawn = _paper.compose_doc(img, st["sheet"], document)
+    PAPER.mkdir(parents=True, exist_ok=True)
+    token = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("token") or "run"))[:40]
+    dest = PAPER / f"out_{token}.jpg"
+    cv2.imwrite(str(dest), out, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    return {"url": f"/img/paper/{dest.name}", "drawn": drawn,
+            "overflow": sum(1 for w in document["words"] if w.get("overflow"))}
 
 
 if __name__ == "__main__":

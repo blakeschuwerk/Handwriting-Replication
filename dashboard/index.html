@@ -501,9 +501,13 @@
 
       <div id="p_preview" style="position:relative;display:inline-block;max-width:100%">
         <img id="p_img" alt="paper" style="max-width:100%;border-radius:8px;display:block">
+        <canvas id="p_words" style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;mix-blend-mode:multiply"></canvas>
         <canvas id="p_ov" style="position:absolute;left:0;top:0;width:100%;height:100%;cursor:crosshair;touch-action:none"></canvas>
       </div>
       <div class="flex" style="margin-top:8px;align-items:center;flex-wrap:wrap;gap:8px">
+        <div class="segbar">
+          <button id="p_modeLines" class="on">Adjust lines</button><button id="p_modeWords">Edit words</button>
+        </div>
         <label style="font-size:12px;color:var(--muted)"><input type="checkbox" id="p_showlines" checked> show the lines</label>
         <label style="font-size:12px;color:var(--muted)"><input type="checkbox" id="p_showconf"> colour by confidence</label>
         <span class="spacer" style="flex:1"></span>
@@ -531,7 +535,24 @@
         <label class="fld"><span>Model</span><select id="p_ckpt"></select></label>
       </div>
 
-      <div class="flex"><button class="btn" id="paperBtn">Write it</button></div>
+      <div class="flex" style="flex-wrap:wrap;gap:8px">
+        <button class="btn" id="paperBtn">Write it</button>
+        <button class="btn ghost" id="p_export">Export full size</button>
+        <span class="muted" id="p_selInfo" style="font-size:12px"></span>
+      </div>
+      <div id="p_wordHelp" class="planbox hidden" style="margin-top:10px">
+        <b>Editing words.</b> Click a word to select it, <kbd>shift</kbd>-click to extend,
+        drag on empty paper to marquee. Drag a selection to move it — only the words you
+        picked move, and they stay put afterwards.
+        <span class="muted">Everything else flows like a word processor: delete a word and the
+        rest moves up to fill the gap.</span><br>
+        <kbd>R</kbd> re-roll an ugly word ·
+        <kbd>E</kbd> retype it ·
+        <kbd>⌫</kbd> delete ·
+        <kbd>U</kbd> return to flow ·
+        <kbd>arrows</kbd> nudge (<kbd>shift</kbd> = further, <kbd>⌘↑↓</kbd> = change line) ·
+        <kbd>⌘A</kbd> all · <kbd>esc</kbd> deselect
+      </div>
       <pre class="log" id="paperLog" style="display:none"></pre>
       <div class="bigshot" id="paperShot"></div>
     </div>
@@ -1506,7 +1527,10 @@ function drawRules() {
   cv.width = img.clientWidth; cv.height = img.clientHeight;
   const ctx = cv.getContext('2d');
   ctx.clearRect(0, 0, cv.width, cv.height);
-  if (!paperGeom || !$('#p_showlines').checked) return;
+  if (!paperGeom || !$('#p_showlines').checked) {
+    if (typeof drawWordChrome === 'function') drawWordChrome(ctx, pscale());
+    return;
+  }
   const k = pscale();
   const path = (pts) => {
     ctx.beginPath();
@@ -1530,6 +1554,8 @@ function drawRules() {
   ctx.strokeStyle = 'rgba(255,80,80,.95)'; path(paperGeom.margin);
   ctx.strokeStyle = 'rgba(230,120,255,.85)'; path(paperGeom.right);
 
+  if (typeof drawWordChrome === 'function') drawWordChrome(ctx, k);
+  if (WE.mode === 'words') return;   // no sheet handles while editing words
   (paperGeom.quad || []).forEach((c, i) => {
     const x = c[0] * k, y = c[1] * k;
     ctx.beginPath(); ctx.arc(x, y, dragCorner === i ? 9 : 7, 0, 7);
@@ -1547,10 +1573,13 @@ function scheduleDraw() {
 
 // --- dragging the writing area -------------------------------------------
 $('#p_ov').addEventListener('pointerdown', (e) => {
+  if (wordsOn()) return;
   if (!paperGeom || !$('#p_showlines').checked) return;
   const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
   const mx = e.clientX - r.left, my = e.clientY - r.top;
   let best = -1, bd = 16;
+  if (typeof drawWordChrome === 'function') drawWordChrome(ctx, k);
+  if (WE.mode === 'words') return;   // no sheet handles while editing words
   (paperGeom.quad || []).forEach((c, i) => {
     const d = Math.hypot(c[0] * k - mx, c[1] * k - my);
     if (d < bd) { bd = d; best = i; }
@@ -1569,7 +1598,7 @@ $('#p_ov').addEventListener('pointerdown', (e) => {
 });
 
 $('#p_ov').addEventListener('pointermove', (e) => {
-  if (dragCorner === null || !paperGeom) return;
+  if (wordsOn() || dragCorner === null || !paperGeom) return;
   const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
   const px = (e.clientX - r.left) / k, py = (e.clientY - r.top) / k;
   if (dragCorner === 'margin') {
@@ -1582,7 +1611,7 @@ $('#p_ov').addEventListener('pointermove', (e) => {
 });
 
 $('#p_ov').addEventListener('pointerup', async (e) => {
-  if (dragCorner === null) return;
+  if (wordsOn() || dragCorner === null) return;
   const which = dragCorner; dragCorner = null;
   $('#p_ov').releasePointerCapture(e.pointerId);
   detInfo('re-solving…');
@@ -1594,12 +1623,254 @@ $('#p_ov').addEventListener('pointerup', async (e) => {
   }
 });
 
+// ---- word editor -----------------------------------------------------------
+// Canvas, not DOM nodes. The box editor rebuilds every element on each mouse
+// move; at a few hundred words over a 4032px photo that is unusable.
+const WE = { doc: null, sel: new Set(), sprites: new Map(), mode: 'lines',
+             drag: null, marquee: null, dirty: false };
+
+function wordsOn() { return WE.mode === 'words'; }
+
+function setMode(m) {
+  WE.mode = m;
+  $('#p_modeLines').classList.toggle('on', m === 'lines');
+  $('#p_modeWords').classList.toggle('on', m === 'words');
+  $('#p_wordHelp').classList.toggle('hidden', m !== 'words');
+  $('#p_ov').style.cursor = m === 'words' ? 'default' : 'crosshair';
+  if (m === 'words' && !WE.doc) loadDoc();
+  drawRules(); drawWords();
+}
+$('#p_modeLines').onclick = () => setMode('lines');
+$('#p_modeWords').onclick = () => setMode('words');
+
+function sprite(png) {
+  if (!png) return null;
+  let im = WE.sprites.get(png);
+  if (!im) {
+    im = new Image();
+    im.onload = () => scheduleWords();
+    im.src = '/img/word/' + encodeURIComponent(png);
+    WE.sprites.set(png, im);
+  }
+  return im;
+}
+
+function selInfo() {
+  const n = WE.sel.size, d = (WE.doc && Array.isArray(WE.doc.words)) ? WE.doc : null;
+  const over = d ? d.overflow : 0;
+  $('#p_selInfo').textContent =
+    (n ? `${n} word${n > 1 ? 's' : ''} selected` : (d ? `${d.words.length} words` : ''))
+    + (over ? ` · ${over} past the last line` : '');
+}
+
+async function loadDoc() {
+  const n = $('#p_paper').value; if (!n) return;
+  const r = await (await fetch('/api/doc?name=' + encodeURIComponent(n))).json();
+  if (r.error) { detInfo('document: ' + r.error); return; }
+  WE.doc = r; selInfo(); drawWords();
+}
+
+async function docPost(url, body) {
+  const n = $('#p_paper').value; if (!n) return null;
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                               body: JSON.stringify(Object.assign({ name: n }, body)) });
+  if (!r.ok) { detInfo('edit failed: HTTP ' + r.status); return null; }
+  const d = await r.json();
+  if (d.error) { detInfo(d.error); return null; }
+  // Only adopt responses that are actually a document; /render answers with a
+  // URL, and assigning that here would wipe the in-memory page.
+  if (Array.isArray(d.words)) { WE.doc = d; selInfo(); drawWords(); }
+  return d;
+}
+
+const edit = (op, extra) => docPost('/api/doc/edit', Object.assign({ op, ids: [...WE.sel] }, extra));
+
+let wordsRaf = false;
+function scheduleWords() {
+  if (wordsRaf) return;
+  wordsRaf = true;
+  requestAnimationFrame(() => { wordsRaf = false; drawWords(); });
+}
+
+function drawWords() {
+  const img = $('#p_img'), cv = $('#p_words');
+  if (!img || !img.clientWidth) return;
+  cv.width = img.clientWidth; cv.height = img.clientHeight;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!WE.doc || !Array.isArray(WE.doc.words) || !wordsOn()) return;
+  const k = pscale();
+  const off = WE.drag ? WE.drag : null;
+
+  for (const w of WE.doc.words) {
+    if (w.overflow || w.x === undefined) continue;
+    const im = sprite(w.png);
+    if (!im || !im.complete || !im.naturalWidth) continue;
+    const moving = off && WE.sel.has(w.id);
+    const x = (w.x + (moving ? off.dx : 0)) * k;
+    const y = (w.y + (moving ? off.dy : 0)) * k;
+    ctx.save();
+    ctx.translate(x, y);
+    if (w.deg) { ctx.translate(w.w * k / 2, w.h * k / 2); ctx.rotate(w.deg * Math.PI / 180);
+                 ctx.translate(-w.w * k / 2, -w.h * k / 2); }
+    ctx.drawImage(im, 0, 0, w.w * k, w.h * k);
+    ctx.restore();
+  }
+}
+
+// selection + overflow highlights live on the rules canvas so they are not
+// multiplied into the paper
+function drawWordChrome(ctx, k) {
+  if (!WE.doc || !Array.isArray(WE.doc.words) || !wordsOn()) return;
+  const off = WE.drag;
+  for (const w of WE.doc.words) {
+    if (w.x === undefined) continue;
+    const moving = off && WE.sel.has(w.id);
+    const x = (w.x + (moving ? off.dx : 0)) * k, y = (w.y + (moving ? off.dy : 0)) * k;
+    if (WE.sel.has(w.id)) {
+      ctx.strokeStyle = 'rgba(124,131,253,.95)'; ctx.lineWidth = 1.5;
+      ctx.strokeRect(x - 2, y - 2, w.w * k + 4, w.h * k + 4);
+    }
+    if (w.pinned) {
+      ctx.beginPath(); ctx.arc(x - 3, y - 3, 3, 0, 7);
+      ctx.fillStyle = '#f0a020'; ctx.fill();
+    }
+  }
+  if (WE.marquee) {
+    const m = WE.marquee;
+    ctx.strokeStyle = 'rgba(124,131,253,.9)'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+    ctx.strokeRect(Math.min(m.x0, m.x1), Math.min(m.y0, m.y1),
+                   Math.abs(m.x1 - m.x0), Math.abs(m.y1 - m.y0));
+    ctx.setLineDash([]);
+  }
+}
+
+function hitWord(px, py) {
+  if (!WE.doc || !Array.isArray(WE.doc.words)) return null;
+  for (let i = WE.doc.words.length - 1; i >= 0; i--) {
+    const w = WE.doc.words[i];
+    if (w.x === undefined || w.overflow) continue;
+    if (px >= w.x && px <= w.x + w.w && py >= w.y && py <= w.y + w.h) return w;
+  }
+  return null;
+}
+
+$('#p_ov').addEventListener('pointerdown', (e) => {
+  if (!wordsOn() || !WE.doc) return;
+  const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
+  const px = (e.clientX - r.left) / k, py = (e.clientY - r.top) / k;
+  const hit = hitWord(px, py);
+  if (hit) {
+    if (e.shiftKey) {
+      // extend in document order, like a text range
+      const ids = WE.doc.words.map(w => w.id);
+      const anchorIdx = ids.indexOf([...WE.sel][WE.sel.size - 1] ?? hit.id);
+      const [a, b] = [anchorIdx, ids.indexOf(hit.id)].sort((x, y) => x - y);
+      for (let i = a; i <= b; i++) WE.sel.add(ids[i]);
+    } else if (e.metaKey || e.ctrlKey) {
+      WE.sel.has(hit.id) ? WE.sel.delete(hit.id) : WE.sel.add(hit.id);
+    } else if (!WE.sel.has(hit.id)) {
+      WE.sel.clear(); WE.sel.add(hit.id);
+    }
+    WE.drag = { dx: 0, dy: 0, x0: px, y0: py, moved: false };
+  } else {
+    if (!e.shiftKey) WE.sel.clear();
+    WE.marquee = { x0: e.clientX - r.left, y0: e.clientY - r.top,
+                   x1: e.clientX - r.left, y1: e.clientY - r.top, px0: px, py0: py };
+  }
+  cv.setPointerCapture(e.pointerId);
+  selInfo(); drawRules(); scheduleWords();
+  e.preventDefault();
+});
+
+$('#p_ov').addEventListener('pointermove', (e) => {
+  if (!wordsOn()) return;
+  const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
+  const px = (e.clientX - r.left) / k, py = (e.clientY - r.top) / k;
+  if (WE.drag) {
+    WE.drag.dx = px - WE.drag.x0; WE.drag.dy = py - WE.drag.y0;
+    if (Math.abs(WE.drag.dx) + Math.abs(WE.drag.dy) > 2) WE.drag.moved = true;
+    scheduleWords(); drawRules();
+  } else if (WE.marquee) {
+    WE.marquee.x1 = e.clientX - r.left; WE.marquee.y1 = e.clientY - r.top;
+    const x0 = Math.min(WE.marquee.px0, px), x1 = Math.max(WE.marquee.px0, px);
+    const y0 = Math.min(WE.marquee.py0, py), y1 = Math.max(WE.marquee.py0, py);
+    WE.sel.clear();
+    for (const w of WE.doc.words) {
+      if (w.x === undefined || w.overflow) continue;
+      if (w.x + w.w > x0 && w.x < x1 && w.y + w.h > y0 && w.y < y1) WE.sel.add(w.id);
+    }
+    selInfo(); drawRules();
+  }
+});
+
+$('#p_ov').addEventListener('pointerup', async (e) => {
+  if (!wordsOn()) return;
+  const cv = $('#p_ov');
+  try { cv.releasePointerCapture(e.pointerId); } catch (_) {}
+  if (WE.marquee) { WE.marquee = null; drawRules(); return; }
+  if (!WE.drag) return;
+  const d = WE.drag; WE.drag = null;
+  if (!d.moved || !WE.sel.size) { drawRules(); scheduleWords(); return; }
+  // drop position of the first selected word decides where the group pins
+  const ids = [...WE.sel];
+  const first = WE.doc.words.find(w => ids.includes(w.id) && w.x !== undefined);
+  if (!first) return;
+  await edit('pin', { x: first.x + d.dx, y: first.y + d.dy + first.h * 0.907 });
+  drawRules();
+});
+
+// keyboard: only while the words mode is on and focus is not in a text field
+document.addEventListener('keydown', async (e) => {
+  if (!wordsOn() || !WE.doc) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  const step = e.shiftKey ? 12 : 3;
+  if (e.key === 'Escape') { WE.sel.clear(); selInfo(); drawRules(); scheduleWords(); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
+    e.preventDefault();
+    WE.doc.words.forEach(w => { if (!w.overflow) WE.sel.add(w.id); });
+    selInfo(); drawRules(); return;
+  }
+  if (!WE.sel.size) return;
+  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); await edit('delete'); WE.sel.clear(); selInfo(); drawRules(); return; }
+  if (e.key === 'r' || e.key === 'R') { e.preventDefault(); detInfo('re-rolling…'); await edit('reroll'); detInfo(''); return; }
+  if (e.key === 'u' || e.key === 'U') { e.preventDefault(); await edit('unpin'); drawRules(); return; }
+  if (e.key === 'e' || e.key === 'E') {
+    e.preventDefault();
+    const cur = WE.doc.words.find(w => WE.sel.has(w.id));
+    const next = prompt('Replace this word with:', cur ? cur.text : '');
+    if (next) { detInfo('regenerating…'); await edit('retext', { text: next }); detInfo(''); }
+    return;
+  }
+  if (e.key.startsWith('Arrow')) {
+    e.preventDefault();
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      await edit('nudge', { dx: 0, dy: 0, dline: e.key === 'ArrowUp' ? -1 : 1 });
+    } else {
+      const dx = e.key === 'ArrowRight' ? step : e.key === 'ArrowLeft' ? -step : 0;
+      const dy = e.key === 'ArrowDown' ? step : e.key === 'ArrowUp' ? -step : 0;
+      await edit('nudge', { dx, dy });
+    }
+    drawRules();
+  }
+});
+
+$('#p_export').onclick = async () => {
+  detInfo('rendering at full size…');
+  const r = await docPost('/api/doc/render', { token: Date.now().toString(36) });
+  if (r && r.url) {
+    $('#paperShot').innerHTML = `<img src="${r.url}?t=${Date.now()}" style="max-width:100%;border-radius:8px">`;
+    detInfo(`rendered ${r.drawn} words` + (r.overflow ? ` · ${r.overflow} past the last line` : ''));
+  }
+};
+
 $('#p_seedNew').onclick = () => { $('#p_seed').value = Math.floor(Math.random() * 100000); };
 $('#p_paper').onchange = showPaper;
 $('#p_showlines').onchange = drawRules;
 $('#p_showconf').onchange = drawRules;
-$('#p_img').onload = drawRules;
-window.addEventListener('resize', scheduleDraw);
+$('#p_img').onload = () => { drawRules(); drawWords(); };
+window.addEventListener('resize', () => { scheduleDraw(); scheduleWords(); });
 
 $('#p_topPlus').onclick = () => adjust({ add_top: 1 });
 $('#p_topMinus').onclick = () => adjust({ add_top: -1 });
