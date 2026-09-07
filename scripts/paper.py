@@ -548,12 +548,17 @@ def sheet_json(sheet, response=None, n_points=24):
 
 
 def write_on_paper(photo_path, text, out_path, style=None, ckpt=None,
-                   device="mps", scale=1.05, start_line=0, darkness=0.22, seed=0):
+                   device="mps", scale=1.05, start_line=0, darkness=0.22, seed=0,
+                   sheet=None):
     """Full pipeline: photo + text -> composited image."""
     print(f"[paper] reading {os.path.basename(photo_path)}", flush=True)
     img = load_photo(photo_path)
     print(f"[paper] {img.shape[1]}x{img.shape[0]}, finding the ruling...", flush=True)
-    sheet, _obs, info = detect_sheet(img)
+    if sheet is None:
+        sheet, _obs, info = detect_sheet(img)
+    else:
+        info = {}
+        print("[paper] using the sheet from the editor", flush=True)
     print(f"[paper] {sheet.n_lines} ruled lines, spacing "
           f"{sheet.spacing_px(sheet.i_first + sheet.n_lines // 2, sheet.u_right / 2):.1f}px"
           + (f", grew {info['grown']}" if info.get("grown") else ""), flush=True)
@@ -596,6 +601,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--detect-only", action="store_true",
                     help="print the ruling geometry as JSON and exit")
+    ap.add_argument("--sheet", help="JSON file holding a sheet the user adjusted; "
+                                    "skips detection so hand edits are honoured")
     a = ap.parse_args()
 
     if a.detect_only:
@@ -607,9 +614,14 @@ def main():
     if not a.text or not a.output:
         ap.error("--text and --output are required unless --detect-only")
 
+    sh = None
+    if a.sheet:
+        import json as _json
+        with open(a.sheet) as fh:
+            sh = _sheet.Sheet.from_json(_json.load(fh))
     r = write_on_paper(a.photo, a.text, a.output, style=a.style, ckpt=a.ckpt,
                        device=a.device, scale=a.scale, start_line=a.start_line,
-                       darkness=a.darkness, seed=a.seed)
+                       darkness=a.darkness, seed=a.seed, sheet=sh)
     print(f"[paper] done: placed {r['placed']}/{r['of']} words on {r['rules']} lines")
 
 

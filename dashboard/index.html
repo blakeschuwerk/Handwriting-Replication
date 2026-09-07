@@ -488,12 +488,21 @@
 
       <div id="p_preview" style="position:relative;display:inline-block;max-width:100%">
         <img id="p_img" alt="paper" style="max-width:100%;border-radius:8px;display:block">
-        <canvas id="p_ov" style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none"></canvas>
+        <canvas id="p_ov" style="position:absolute;left:0;top:0;width:100%;height:100%;cursor:crosshair;touch-action:none"></canvas>
       </div>
-      <div class="flex" style="margin-top:8px;align-items:center">
-        <label style="font-size:12px;color:var(--muted)"><input type="checkbox" id="p_showlines" checked> show the lines it found</label>
-        <span class="muted" id="p_detinfo" style="font-size:12px"></span>
+      <div class="flex" style="margin-top:8px;align-items:center;flex-wrap:wrap;gap:8px">
+        <label style="font-size:12px;color:var(--muted)"><input type="checkbox" id="p_showlines" checked> show the lines</label>
+        <label style="font-size:12px;color:var(--muted)"><input type="checkbox" id="p_showconf"> colour by confidence</label>
+        <span class="spacer" style="flex:1"></span>
+        <button class="minibtn" id="p_topMinus" title="drop the top line">top −</button>
+        <button class="minibtn" id="p_topPlus" title="add a line above">top +</button>
+        <button class="minibtn" id="p_botMinus" title="drop the bottom line">bottom −</button>
+        <button class="minibtn" id="p_botPlus" title="add a line below">bottom +</button>
+        <button class="minibtn" id="p_resnap" title="re-solve against the ink">↻ snap to lines</button>
+        <button class="minibtn" id="p_redetect" title="start detection over">reset</button>
       </div>
+      <div class="muted" id="p_detinfo" style="font-size:12px;margin-top:6px"></div>
+      <div class="muted" style="font-size:11px;margin-top:2px">Drag the four corner handles to set the writing area, or the red line to move the margin. The lines stay locked to the paper — you never draw one.</div>
 
       <label class="fld"><span>Text</span><textarea id="p_text" rows="6" spellcheck="false">Operations management is the administration of business practices to create the highest level of efficiency possible.
 	It converts materials and labor into goods and services as efficiently as possible.</textarea></label>
@@ -1408,7 +1417,9 @@ refreshStatus().then(loadRawThumbs);
 setInterval(() => { if (!document.hidden) refreshStatus(); }, 6000);
 
 // ---- 6 · write on paper ----------------------------------------------------
-let paperGeom = null;
+let paperGeom = null;      // last response from detect/adjust
+let dragCorner = null;     // index of the corner being dragged, or 'margin'
+let rafPending = false;
 
 async function loadPapers() {
   const d = await (await fetch('/api/paper/list')).json();
@@ -1419,18 +1430,45 @@ async function loadPapers() {
   await showPaper();
 }
 
-async function showPaper() {
-  const n = $('#p_paper').value;
-  if (!n) { $('#p_detinfo').textContent = 'no paper photos yet — upload one'; return; }
-  $('#p_img').src = '/img/paper/' + encodeURIComponent(n);
-  paperGeom = null; drawRules();
-  $('#p_detinfo').textContent = 'finding the ruled lines…';
-  const g = await (await fetch('/api/paper/detect?name=' + encodeURIComponent(n))).json();
-  if (g.error) { $('#p_detinfo').textContent = 'could not find ruled lines: ' + g.error; return; }
+function detInfo(msg) { $('#p_detinfo').textContent = msg; }
+
+function applyGeom(g) {
+  if (g.error) { detInfo('could not find ruled lines: ' + g.error); paperGeom = null; drawRules(); return; }
   paperGeom = g;
-  $('#p_detinfo').textContent = `${g.count} ruled lines · spacing ${g.spacing}px`;
+  const conf = g.confidence || [];
+  // 1.0 == as much ink as a typical rule on this page
+  const weak = conf.filter(c => c < 0.35).length;
+  detInfo(`${g.count} ruled lines · spacing ${g.spacing}px`
+    + (weak ? ` · ${weak} line${weak > 1 ? 's' : ''} with weak ink — check the fit` : ''));
   $('#p_start').max = Math.max(0, g.count - 1);
   drawRules();
+}
+
+async function showPaper() {
+  const n = $('#p_paper').value;
+  if (!n) { detInfo('no paper photos yet — upload one'); return; }
+  $('#p_img').src = '/img/paper/' + encodeURIComponent(n);
+  paperGeom = null; drawRules();
+  detInfo('finding the ruled lines…');
+  applyGeom(await (await fetch('/api/paper/detect?name=' + encodeURIComponent(n))).json());
+}
+
+async function adjust(edit) {
+  const n = $('#p_paper').value;
+  if (!n || !paperGeom) return;
+  const body = Object.assign({ name: n, sheet: paperGeom.sheet }, edit);
+  const r = await fetch('/api/paper/adjust', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) { detInfo('adjust failed: HTTP ' + r.status); return; }
+  applyGeom(await r.json());
+}
+
+// photo pixels -> canvas pixels
+function pscale() {
+  const img = $('#p_img');
+  return img.naturalWidth ? img.clientWidth / img.naturalWidth : 1;
 }
 
 function drawRules() {
@@ -1440,24 +1478,114 @@ function drawRules() {
   const ctx = cv.getContext('2d');
   ctx.clearRect(0, 0, cv.width, cv.height);
   if (!paperGeom || !$('#p_showlines').checked) return;
-  const sx = cv.width / paperGeom.size[0], sy = cv.height / paperGeom.size[1];
-  ctx.strokeStyle = 'rgba(80,220,150,.9)'; ctx.lineWidth = 1.2;
-  for (const L of paperGeom.lines) {
+  const k = pscale();
+  const path = (pts) => {
     ctx.beginPath();
-    L.pts.forEach((q, i) => i ? ctx.lineTo(q[0] * sx, q[1] * sy) : ctx.moveTo(q[0] * sx, q[1] * sy));
+    pts.forEach((q, i) => i ? ctx.lineTo(q[0] * k, q[1] * k) : ctx.moveTo(q[0] * k, q[1] * k));
     ctx.stroke();
-  }
+  };
+
+  const conf = paperGeom.confidence || [];
+  const byConf = $('#p_showconf').checked;
+  ctx.lineWidth = 1.3;
+  paperGeom.lines.forEach((L, i) => {
+    // weak lines shown warm, so a bad fit is visible before anything renders
+    const c = Math.min(1, conf.length ? conf[i] : 1);
+    ctx.strokeStyle = byConf
+      ? `rgba(${Math.round(255 - 175 * c)},${Math.round(80 + 140 * c)},90,.92)`
+      : 'rgba(80,220,150,.9)';
+    path(L.pts);
+  });
+
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(255,80,80,.95)'; path(paperGeom.margin);
+  ctx.strokeStyle = 'rgba(230,120,255,.85)'; path(paperGeom.right);
+
+  (paperGeom.quad || []).forEach((c, i) => {
+    const x = c[0] * k, y = c[1] * k;
+    ctx.beginPath(); ctx.arc(x, y, dragCorner === i ? 9 : 7, 0, 7);
+    ctx.fillStyle = dragCorner === i ? '#fff' : 'rgba(255,255,255,.85)';
+    ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = '#1a7f4b'; ctx.stroke();
+  });
 }
+
+function scheduleDraw() {
+  if (rafPending) return;
+  rafPending = true;
+  requestAnimationFrame(() => { rafPending = false; drawRules(); });
+}
+
+// --- dragging the writing area -------------------------------------------
+$('#p_ov').addEventListener('pointerdown', (e) => {
+  if (!paperGeom || !$('#p_showlines').checked) return;
+  const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  let best = -1, bd = 16;
+  (paperGeom.quad || []).forEach((c, i) => {
+    const d = Math.hypot(c[0] * k - mx, c[1] * k - my);
+    if (d < bd) { bd = d; best = i; }
+  });
+  if (best < 0) {
+    // not a corner: is it the margin guide?
+    const m = paperGeom.margin;
+    const near = m.some(q => Math.hypot(q[0] * k - mx, q[1] * k - my) < 14);
+    if (!near) return;
+    dragCorner = 'margin';
+  } else {
+    dragCorner = best;
+  }
+  cv.setPointerCapture(e.pointerId);
+  e.preventDefault();
+});
+
+$('#p_ov').addEventListener('pointermove', (e) => {
+  if (dragCorner === null || !paperGeom) return;
+  const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
+  const px = (e.clientX - r.left) / k, py = (e.clientY - r.top) / k;
+  if (dragCorner === 'margin') {
+    const dx = px - paperGeom.margin[Math.floor(paperGeom.margin.length / 2)][0];
+    paperGeom.margin = paperGeom.margin.map(q => [q[0] + dx, q[1]]);
+  } else {
+    paperGeom.quad[dragCorner] = [px, py];
+  }
+  scheduleDraw();
+});
+
+$('#p_ov').addEventListener('pointerup', async (e) => {
+  if (dragCorner === null) return;
+  const which = dragCorner; dragCorner = null;
+  $('#p_ov').releasePointerCapture(e.pointerId);
+  detInfo('re-solving…');
+  if (which === 'margin') {
+    const m = paperGeom.margin[Math.floor(paperGeom.margin.length / 2)];
+    await adjust({ margin_x: m[0] });
+  } else {
+    await adjust({ quad: paperGeom.quad });
+  }
+});
 
 $('#p_paper').onchange = showPaper;
 $('#p_showlines').onchange = drawRules;
+$('#p_showconf').onchange = drawRules;
 $('#p_img').onload = drawRules;
-window.addEventListener('resize', drawRules);
+window.addEventListener('resize', scheduleDraw);
+
+$('#p_topPlus').onclick = () => adjust({ add_top: 1 });
+$('#p_topMinus').onclick = () => adjust({ add_top: -1 });
+$('#p_botPlus').onclick = () => adjust({ add_bottom: 1 });
+$('#p_botMinus').onclick = () => adjust({ add_bottom: -1 });
+$('#p_resnap').onclick = () => { detInfo('snapping to the ink…'); adjust({ resnap: true }); };
+$('#p_redetect').onclick = async () => {
+  detInfo('re-detecting…');
+  applyGeom(await (await fetch('/api/paper/detect?rebuild=true&name='
+    + encodeURIComponent($('#p_paper').value))).json());
+};
 
 $('#p_file').onchange = async (e) => {
   const fd = new FormData();
   [...e.target.files].forEach(f => fd.append('files', f));
-  $('#p_detinfo').textContent = 'uploading…';
+  detInfo('uploading…');
   const r = await (await fetch('/api/paper/upload', { method: 'POST', body: fd })).json();
   e.target.value = '';
   await loadPapers();

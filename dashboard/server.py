@@ -988,28 +988,108 @@ def img_paper(name: str):
     return FileResponse(_paper_path(name))
 
 
-@app.get("/api/paper/detect")
-def paper_detect(name: str):
-    """Ruled-line geometry for the overlay. Cached on mtime -- detection takes
-    a few seconds and the UI asks for it on every paper switch."""
+# Detection runs in-process, not as a subprocess: the editor re-derives the
+# sheet on every handle drag and a process launch alone would blow the budget.
+sys.path.insert(0, str(SCRIPTS))
+import paper as _paper          # noqa: E402
+import sheet as _sheetmod       # noqa: E402
+
+_PAPER = {}   # name -> {sheet, obs, flat, mtime}
+
+
+def _paper_state(name, rebuild=False):
     path = _paper_path(name)
-    key = (str(path), path.stat().st_mtime)
-    if key not in _RULING_CACHE:
-        proc = subprocess.run(
-            [PY, str(SCRIPTS / "paper.py"), "--detect-only", "--photo", str(path)],
-            cwd=str(PROJECT), env=_env(), capture_output=True, text=True,
-        )
-        if proc.returncode != 0:
-            return {"error": (proc.stderr or "detection failed").strip()[-400:]}
-        _RULING_CACHE.clear()  # only ever need the paper being looked at
-        _RULING_CACHE[key] = json.loads(proc.stdout)
-    return _RULING_CACHE[key]
+    mt = path.stat().st_mtime
+    st = _PAPER.get(name)
+    if st is None or st["mtime"] != mt or rebuild:
+        img = _paper.load_photo(str(path))
+        sheet, obs, info = _paper.detect_sheet(img)
+        st = {"sheet": sheet, "obs": obs, "flat": _paper._flat_response(img),
+              "mtime": mt, "grown": info.get("grown")}
+        _PAPER.clear()        # only ever one page open at a time
+        _PAPER[name] = st
+    return st
+
+
+@app.get("/api/paper/detect")
+def paper_detect(name: str, rebuild: bool = False):
+    """Ruled-line geometry for the overlay."""
+    try:
+        st = _paper_state(name, rebuild)
+    except Exception as exc:
+        return {"error": str(exc)[:400]}
+    return _paper.sheet_json(st["sheet"], st["flat"])
+
+
+@app.post("/api/paper/adjust")
+async def paper_adjust(payload: dict):
+    """Apply the user's corrections to the sheet.
+
+    Most edits are pure rectangle changes -- dragging a corner along the rules
+    only moves u_left/u_right, and dragging across them only picks a different
+    first/last rule. Those need no optimisation at all, which matters: refitting
+    on every drag would make a 3px nudge jump the whole page. The nonlinear
+    refit is reserved for an explicit "snap to lines".
+    """
+    name = payload.get("name")
+    if not name:
+        return {"error": "no paper named"}
+    try:
+        st = _paper_state(name)
+    except Exception as exc:
+        return {"error": str(exc)[:400]}
+
+    sh = _sheetmod.Sheet.from_json(payload["sheet"]) if payload.get("sheet") else st["sheet"]
+    sh = _sheetmod.Sheet.from_json(sh.to_json())      # work on a copy
+
+    quad = payload.get("quad")
+    if quad and len(quad) == 4:
+        us, vs = [], []
+        for x, y in quad:
+            u, v = sh.uv(float(x), float(y))
+            us.append(float(u[0]))
+            vs.append(float(v[0]))
+        # corners are TL, TR, BR, BL -- left/right from u, first/last from v,
+        # rounded because a rule index is by definition a whole number
+        sh.u_left = min(us[0], us[3])
+        sh.u_right = max(us[1], us[2])
+        i0 = int(round(min(vs[0], vs[1])))
+        i1 = int(round(max(vs[2], vs[3])))
+        if i1 > i0:
+            sh.i_first, sh.n_lines = i0, i1 - i0 + 1
+
+    if payload.get("margin_x") is not None:
+        mx = float(payload["margin_x"])
+        my = sh.point(sh.i_first + sh.n_lines // 2, sh.u_right / 2)[1]
+        u, _ = sh.uv(mx, my)
+        sh.shift_u(-float(u[0]))
+        sh.u_left = 0.0
+        sh.margin_x = mx
+
+    if payload.get("bow") is not None:
+        sh.c1 = float(payload["bow"])
+    if payload.get("add_top"):
+        n = int(payload["add_top"])
+        sh.i_first -= n
+        sh.n_lines += n
+    if payload.get("add_bottom"):
+        sh.n_lines += int(payload["add_bottom"])
+    sh.n_lines = max(1, sh.n_lines)
+
+    if payload.get("resnap"):
+        keep = (sh.u_left, sh.u_right, sh.i_first, sh.n_lines, sh.margin_x)
+        sh, _info = _sheetmod.refit(sh, st["obs"])
+        sh.u_left, sh.u_right, sh.i_first, sh.n_lines, sh.margin_x = keep
+
+    st["sheet"] = sh
+    return _paper.sheet_json(sh, st["flat"])
 
 
 @app.get("/api/paper/write")
 def paper_write(name: str, text: str, token: str, style: str = "",
                 ckpt: str = "pretrained", scale: float = 1.05,
-                start_line: int = 0, darkness: float = 0.22, seed: int = 0):
+                start_line: int = 0, darkness: float = 0.22, seed: int = 0,
+                use_sheet: bool = True):
     PAPER.mkdir(parents=True, exist_ok=True)
     token = re.sub(r"[^A-Za-z0-9_-]", "", token)[:40] or "run"
     out = PAPER / f"out_{token}.jpg"
@@ -1024,6 +1104,12 @@ def paper_write(name: str, text: str, token: str, style: str = "",
         "--darkness", str(darkness),
         "--seed", str(seed),
     ]
+    # Hand the edited sheet to the renderer, or the user's corrections would be
+    # thrown away and detection would simply run again.
+    if use_sheet and name in _PAPER:
+        sp = PAPER / f"sheet_{token}.json"
+        sp.write_text(json.dumps(_PAPER[name]["sheet"].to_json()))
+        args += ["--sheet", str(sp)]
     if style:
         args += ["--style", str(SEGMENTED / style)]
     if ckpt and ckpt != "pretrained":

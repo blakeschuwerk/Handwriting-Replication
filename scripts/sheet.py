@@ -457,19 +457,34 @@ def extend_lines(sheet, response, max_add=8, keep=0.35):
 
 
 def line_confidence(sheet, response, n=48):
-    """Mean ink response along each rule, normalised to [0,1].
+    """How much more ink sits ON each rule than in the gap beside it.
 
-    Surfaced in the UI so a bad fit is visible before anything is rendered,
-    rather than being discovered in the output.
+    Contrast against the immediate neighbourhood, not the raw response. The
+    flat-fielded blue channel goes negative where the page falls into shadow,
+    so a raw reading scores a perfectly placed rule at the top of the page as
+    zero -- which is exactly the false alarm that teaches a user to ignore the
+    warning. Contrast is immune to that offset, and it measures the thing we
+    actually care about: is there a rule here rather than half a line away.
+
+    Normalised so 1.0 is a typical rule on this page.
     """
     H, W = response.shape
-    out = []
-    for k in range(sheet.n_lines):
-        pts = sheet.polyline(sheet.i_first + k, n)
+
+    def sample(i):
+        pts = sheet.polyline(i, n)
         xs = np.clip(pts[:, 0], 0, W - 1).astype(int)
         ys = np.clip(pts[:, 1], 0, H - 1).astype(int)
-        out.append(float(response[ys, xs].mean()))
+        return response[ys, xs].mean()
+
+    out = []
+    for k in range(sheet.n_lines):
+        i = sheet.i_first + k
+        on = sample(i)
+        gap = 0.5 * (sample(i - 0.5) + sample(i + 0.5))
+        out.append(float(on - gap))
     a = np.array(out)
-    if a.max() > a.min():
-        a = (a - a.min()) / (a.max() - a.min())
-    return a.tolist()
+    pos = a[a > 0]
+    med = np.median(pos) if pos.size else 1.0
+    if med <= 0:
+        med = 1.0
+    return np.clip(a / med, 0.0, 1.5).tolist()
