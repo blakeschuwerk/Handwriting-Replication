@@ -183,6 +183,19 @@
   .pagecard.pick .tick { background: var(--accent); color: #0b0d12; border-color: var(--accent); }
 
   /* ---- training controls ---- */
+  label.fld .rv { float: right; color: var(--txt); font-weight: 600; font-variant-numeric: tabular-nums; }
+  input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 22px;
+    background: transparent; cursor: pointer; margin: 0; }
+  input[type=range]::-webkit-slider-runnable-track { height: 6px; border-radius: 999px;
+    background: var(--panel2); border: 1px solid var(--line); }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none;
+    width: 16px; height: 16px; margin-top: -6px; border-radius: 50%;
+    background: var(--accent); border: 2px solid var(--panel); }
+  input[type=range]:focus { outline: none; }
+  input[type=range]:focus::-webkit-slider-thumb { box-shadow: 0 0 0 3px rgba(124,131,253,.35); }
+  input.nospin::-webkit-outer-spin-button, input.nospin::-webkit-inner-spin-button {
+    -webkit-appearance: none; margin: 0; }
+  input.nospin { -moz-appearance: textfield; }
   label.fld small { display: block; color: var(--muted); font-size: 11px; line-height: 1.4; margin: -6px 0 6px; }
   .primer { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 16px; }
   .primer summary { padding: 10px 14px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--accent); list-style: none; }
@@ -423,12 +436,12 @@
           </div>
           <div id="planbox" class="planbox"></div>
           <div class="row">
-            <label class="fld"><span>Epochs</span><small>How many times it re-reads all 1,975 words. More = learns your style better, but too many can make it memorize instead of generalize.</small><input type="number" id="t_epochs" value="40" min="1"></label>
+            <label class="fld"><span>Epochs<b class="rv" id="t_epochs_v">40</b></span><small>How many times it re-reads all 1,975 words. More = learns your style better, but too many can make it memorize instead of generalize.</small><input type="range" id="t_epochs" value="40" min="5" max="120" step="1" data-rv="t_epochs_v"></label>
             <label class="fld"><span>Learning rate</span><small>Size of each nudge toward your handwriting. Bigger = faster change but riskier; smaller = safer but slower.</small><input type="text" id="t_lr" value="1e-4"></label>
           </div>
           <div class="row">
-            <label class="fld"><span>Batch size</span><small>How many words it looks at per nudge. Leave at 8 unless training crashes with a memory error — then lower it.</small><input type="number" id="t_batch" value="8" min="1"></label>
-            <label class="fld"><span>Preview every N steps</span><small>How often it stops to draw a sample and save a checkpoint, so you can watch progress without waiting for the whole run.</small><input type="number" id="t_every" value="25" min="1"></label>
+            <label class="fld"><span>Batch size<b class="rv" id="t_batch_v">8</b></span><small>How many words it looks at per nudge. Leave at 8 unless training crashes with a memory error — then lower it.</small><input type="range" id="t_batch" value="8" min="1" max="32" step="1" data-rv="t_batch_v"></label>
+            <label class="fld"><span>Preview every N steps<b class="rv" id="t_every_v">25</b></span><small>How often it stops to draw a sample and save a checkpoint, so you can watch progress without waiting for the whole run.</small><input type="range" id="t_every" value="25" min="5" max="200" step="5" data-rv="t_every_v"></label>
           </div>
         </div>
       </div>
@@ -508,10 +521,10 @@
 	It converts materials and labor into goods and services as efficiently as possible.</textarea></label>
 
       <div class="row">
-        <label class="fld"><span>Start on line</span><input type="number" id="p_start" value="0" min="0"></label>
-        <label class="fld"><span>Size (&times; line spacing)</span><input type="number" id="p_scale" value="1.05" step="0.05" min="0.4" max="2.5"></label>
-        <label class="fld"><span>Darkness</span><input type="number" id="p_dark" value="0.22" step="0.02" min="0" max="1"></label>
-        <label class="fld"><span>Seed</span><input type="number" id="p_seed" value="0"></label>
+        <label class="fld"><span>Start on line<b class="rv" id="p_start_v">0</b></span><input type="range" id="p_start" value="0" min="0" max="40" step="1" data-rv="p_start_v"></label>
+        <label class="fld"><span>Size (&times; line spacing)<b class="rv" id="p_scale_v">1.05</b></span><input type="range" id="p_scale" value="1.05" step="0.05" min="0.4" max="2.5" data-rv="p_scale_v"></label>
+        <label class="fld"><span>Darkness<b class="rv" id="p_dark_v">0.22</b></span><input type="range" id="p_dark" value="0.22" step="0.02" min="0" max="1" data-rv="p_dark_v"></label>
+        <label class="fld"><span>Seed</span><span class="flex" style="gap:6px"><input type="number" class="nospin" id="p_seed" value="0" style="flex:1"><button type="button" class="minibtn" id="p_seedNew" title="try a different one">shuffle</button></span></label>
       </div>
       <div class="row">
         <label class="fld"><span>Style reference crop</span><select id="p_style"></select></label>
@@ -555,6 +568,17 @@
 
 <script>
 const $ = (s) => document.querySelector(s);
+// Sliders carry their value in the label, so the number is still readable
+// without hunting for a tooltip.
+function refreshRanges() {
+  document.querySelectorAll('input[type=range][data-rv]').forEach(r => {
+    const out = document.getElementById(r.dataset.rv);
+    if (out) out.textContent = r.value;
+  });
+}
+document.addEventListener('input', (e) => {
+  if (e.target.matches && e.target.matches('input[type=range][data-rv]')) refreshRanges();
+});
 const $$ = (s) => document.querySelectorAll(s);
 
 // ---- tabs ----
@@ -1254,6 +1278,7 @@ function padSet(clientX, clientY) {
   const y = Math.min(1, Math.max(0, (clientY - r.top) / r.height));
   $('#t_lr').value = fmtLr(xToLr(x));
   $('#t_epochs').value = Math.round(EP_MIN + (1 - y) * (EP_MAX - EP_MIN));
+  refreshRanges();
   $('#padhandle').style.left = (x * r.width) + 'px';
   $('#padhandle').style.top = (y * r.height) + 'px';
   $$('#presetBar button').forEach(b => b.classList.remove('on'));
@@ -1271,6 +1296,7 @@ $$('#presetBar button').forEach(b => b.onclick = () => {
   const p = PRESETS[b.dataset.p];
   $('#t_epochs').value = p.epochs; $('#t_lr').value = p.lr;
   $('#t_batch').value = p.batch; $('#t_every').value = p.every;
+  refreshRanges();
   $$('#presetBar button').forEach(x => x.classList.remove('on'));
   b.classList.add('on');
   syncPadFromFields();
@@ -1385,6 +1411,7 @@ function startTrainPoll() {
       clearInterval(trainPoll); trainPoll = null;
       $('#trainStart').disabled = false; $('#trainStop').disabled = true;
       refreshStatus(); refreshSelects();
+      refreshRanges();
     }
   }, 2500);
 }
@@ -1441,6 +1468,8 @@ function applyGeom(g) {
   detInfo(`${g.count} ruled lines · spacing ${g.spacing}px`
     + (weak ? ` · ${weak} line${weak > 1 ? 's' : ''} with weak ink — check the fit` : ''));
   $('#p_start').max = Math.max(0, g.count - 1);
+  if (+$('#p_start').value > +$('#p_start').max) $('#p_start').value = $('#p_start').max;
+  refreshRanges();
   drawRules();
 }
 
@@ -1565,6 +1594,7 @@ $('#p_ov').addEventListener('pointerup', async (e) => {
   }
 });
 
+$('#p_seedNew').onclick = () => { $('#p_seed').value = Math.floor(Math.random() * 100000); };
 $('#p_paper').onchange = showPaper;
 $('#p_showlines').onchange = drawRules;
 $('#p_showconf').onchange = drawRules;
