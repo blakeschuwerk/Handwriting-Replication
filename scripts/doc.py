@@ -367,3 +367,106 @@ def move_pins(doc, ids, dline, du):
         if w["id"] in wanted and w.get("pin"):
             w["pin"]["line"] = int(w["pin"]["line"] + dline)
             w["pin"]["u"] = float(w["pin"]["u"] + du)
+
+
+# ---------------------------------------------------------------------------
+# Word images
+# ---------------------------------------------------------------------------
+
+PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GENERATE_PY = os.path.join(PROJECT, "scripts", "generate.py")
+VENV_PYTHON = os.path.join(PROJECT, ".venv", "bin", "python3")
+
+
+def word_seed(w):
+    """A word's own seed, from its id and how many times it has been re-rolled.
+
+    Derived rather than stored so it cannot drift out of step with the variant
+    counter, and independent of neighbours so adding or deleting a word never
+    changes how another word looks.
+    """
+    h = hashlib.blake2b(f"{w['id']}:{w.get('variant', 0)}".encode(), digest_size=8)
+    return int.from_bytes(h.digest(), "big") % (2 ** 31)
+
+
+def _cache_key(w, style, ckpt):
+    sig = f"{w['text']}|{word_seed(w)}|{style or ''}|{ckpt or ''}"
+    return hashlib.blake2b(sig.encode(), digest_size=10).hexdigest()
+
+
+def reroll(doc, ids):
+    """Ask the generator for a different rendering of these words."""
+    wanted = set(ids)
+    n = 0
+    for w in doc["words"]:
+        if w["id"] in wanted:
+            w["variant"] = int(w.get("variant", 0)) + 1
+            w["png"] = None
+            n += 1
+    return n
+
+
+def ensure_words(doc, cache_dir, style=None, ckpt=None, device="mps", log=None):
+    """Generate images only for words that do not have one cached.
+
+    The cache is keyed on the word's text, its own seed, the style crop and the
+    checkpoint -- so editing one word regenerates exactly that word. Generating
+    the whole page instead would re-roll every other word too, because the model
+    is stochastic, and the page would visibly change under the user on every
+    keystroke.
+    """
+    import subprocess
+    from glob import glob as _glob
+    from PIL import Image as _Image
+
+    os.makedirs(cache_dir, exist_ok=True)
+    need = []
+    for w in doc["words"]:
+        key = _cache_key(w, style, ckpt)
+        path = os.path.join(cache_dir, key + ".png")
+        if os.path.exists(path):
+            w["png"] = path
+            if not w.get("aspect"):
+                iw, ih = _Image.open(path).size
+                w["aspect"] = iw / ih
+        else:
+            need.append((w, path))
+
+    if not need:
+        return {"generated": 0, "cached": len(doc["words"])}
+
+    if log:
+        log(f"generating {len(need)} new word image(s); "
+            f"{len(doc['words']) - len(need)} already cached")
+
+    tmp = os.path.join(cache_dir, f"_tmp_{uuid.uuid4().hex[:8]}")
+    os.makedirs(tmp, exist_ok=True)
+    cmd = [VENV_PYTHON, GENERATE_PY,
+           "--text", " ".join(w["text"] for w, _ in need),
+           "--seeds", ",".join(str(word_seed(w)) for w, _ in need),
+           "--device", device, "--output-dir", tmp]
+    if style:
+        cmd += ["--style", style]
+    if ckpt:
+        cmd += ["--ckpt", ckpt]
+    env = {**os.environ, "PYTORCH_ENABLE_MPS_FALLBACK": "1"}
+    res = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    if res.returncode != 0:
+        raise RuntimeError(f"generate.py failed:\n{res.stderr[-2000:]}")
+
+    pngs = [f for f in sorted(_glob(os.path.join(tmp, "*.png")))
+            if not os.path.basename(f).startswith("_")]
+    if len(pngs) != len(need):
+        raise RuntimeError(f"asked for {len(need)} word images, got {len(pngs)} -- "
+                           "a word was probably dropped by alphabet filtering")
+
+    for (w, dest), src in zip(need, pngs):
+        os.replace(src, dest)
+        w["png"] = dest
+        iw, ih = _Image.open(dest).size
+        w["aspect"] = iw / ih
+        w["gen"] = {"style": style, "ckpt": ckpt, "seed": word_seed(w)}
+    for junk in _glob(os.path.join(tmp, "*")):
+        os.remove(junk)
+    os.rmdir(tmp)
+    return {"generated": len(need), "cached": len(doc["words"]) - len(need)}

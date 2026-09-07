@@ -90,6 +90,13 @@ def parse_args():
     )
     p.add_argument("--output-dir", default=os.path.join(PROJECT, "output"), help="Directory to write PNG outputs.")
     p.add_argument("--device", default="mps", help="Torch device to run on (mps/cpu/cuda).")
+    p.add_argument(
+        "--seeds",
+        help="Comma-separated seed per word. Each word's noise is drawn from its own "
+             "seed, so a word's appearance depends only on itself -- adding or removing "
+             "a word cannot change how any other word looks, and re-rolling one word is "
+             "reproducible. Omit for the previous behaviour (fresh randomness each run).",
+    )
     args = p.parse_args()
     if not args.style:
         args.style = default_style_refs()
@@ -216,6 +223,13 @@ def main():
         sys.exit(1)
 
     # --- Generate per word --------------------------------------------------
+    seeds = None
+    if getattr(args, "seeds", None):
+        seeds = [int(x) for x in args.seeds.split(",") if x.strip() != ""]
+        if len(seeds) != len(words):
+            print(f"WARNING: {len(seeds)} seed(s) for {len(words)} word(s); cycling",
+                  file=sys.stderr)
+
     word_images = []
     with torch.no_grad():
         for idx, word in enumerate(words):
@@ -223,7 +237,13 @@ def main():
             word_lbs = torch.LongTensor(enc).unsqueeze(0).to(device)  # (1, L)
             word_lb_lens = torch.IntTensor([len(word)]).to(device)  # (1,)
 
-            noise = torch.randn((1, noise_dim), device=device)  # (1, 32)
+            if seeds is not None:
+                # Per word, not once per run: seeding once would make every word's
+                # noise depend on how many words came before it.
+                gen = torch.Generator(device="cpu").manual_seed(int(seeds[idx % len(seeds)]))
+                noise = torch.randn((1, noise_dim), generator=gen).to(device)
+            else:
+                noise = torch.randn((1, noise_dim), device=device)  # (1, 32)
             enc_z = torch.cat([noise, style_mu], dim=1)  # (1, 128)
 
             fake = model.models.G(enc_z, word_lbs, word_lb_lens)  # (1,1,32, L*char_width)

@@ -547,6 +547,69 @@ def sheet_json(sheet, response=None, n_points=24):
     return out
 
 
+def compose_doc(bgr, sheet, document, scale=None, darkness=None):
+    """Composite an editable document onto the photo.
+
+    Same blend as compose(), but driven by word records: each word carries its
+    own image, its own page-space position and its own deterministic variation,
+    so the result depends on the document rather than on iteration order.
+    """
+    import doc as _doc
+    o = dict(_doc.DEFAULTS)
+    o.update(document.get("opts") or {})
+    if scale is not None:
+        o["scale"] = scale
+    if darkness is not None:
+        o["darkness"] = darkness
+    hp = _doc.humanize_params(o["humanize"])
+
+    out = bgr.astype(np.float32)
+    H, W = out.shape[:2]
+    drawn = 0
+
+    for w in sorted(document["words"], key=lambda d: d["ord"]):
+        p = w.get("placed")
+        if not p or w.get("overflow") or not w.get("png"):
+            continue
+        line, u = p["line"], p["u"]
+
+        size = 1.0 + (_doc.word_unit(document, w["id"], "size") * 2 - 1) * hp["size_sd"]
+        h_px = sheet.spacing_px(line, u) * o["scale"] * w.get("scale", 1.0) * size
+        alpha = ink_alpha(Image.open(w["png"]))
+        h = max(4, int(round(h_px)))
+        wd = max(2, int(round(alpha.width * h / alpha.height)))
+        a = np.asarray(alpha.resize((wd, h), Image.LANCZOS), np.float32) / 255.0
+
+        slant = (_doc.word_unit(document, w["id"], "slant") * 2 - 1) * hp["slant_sd"]
+        ang = sheet.tangent_deg(line, u + (w.get("aspect") or 3.0) * o["scale"] / 2) \
+            + slant + w.get("slant", 0.0)
+        if abs(ang) > 0.05:
+            d = math.radians(ang)
+            nw = int(abs(wd * math.cos(d)) + abs(h * math.sin(d))) + 2
+            nh = int(abs(wd * math.sin(d)) + abs(h * math.cos(d))) + 2
+            M = cv2.getRotationMatrix2D((wd / 2, h / 2), -ang, 1.0)
+            M[0, 2] += nw / 2 - wd / 2
+            M[1, 2] += nh / 2 - h / 2
+            a = cv2.warpAffine(a, M, (nw, nh), flags=cv2.INTER_LINEAR, borderValue=0.0)
+            wd, h = nw, nh
+
+        bx, by = sheet.point(line, u)
+        by += _doc.baseline_drift(document, line, u, hp["baseline"]) * h_px
+        x0 = int(round(bx))
+        y0 = int(round(by - BASELINE_FRAC * h_px - (h - h_px) / 2))
+
+        sx0, sy0 = max(0, x0), max(0, y0)
+        sx1, sy1 = min(W, x0 + wd), min(H, y0 + h)
+        if sx1 <= sx0 or sy1 <= sy0:
+            continue
+        sub = a[sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0][..., None]
+        dk = o["darkness"] ** max(0.05, w.get("dark", 1.0))
+        out[sy0:sy1, sx0:sx1] *= (1.0 - sub * (1.0 - dk))
+        drawn += 1
+
+    return np.clip(out, 0, 255).astype(np.uint8), drawn
+
+
 def write_on_paper(photo_path, text, out_path, style=None, ckpt=None,
                    device="mps", scale=1.05, start_line=0, darkness=0.22, seed=0,
                    sheet=None):
