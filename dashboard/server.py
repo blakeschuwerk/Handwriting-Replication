@@ -1152,14 +1152,14 @@ def doc_view(document, sheet):
 
 
 def _rebuild_text(document):
-    """Reconstruct the source text after words were deleted on the canvas."""
+    """Reconstruct the source text from the words, including their structure."""
     out = []
-    for w in sorted(document["words"], key=lambda d: d["ord"]):
-        if w["nl"] and out:
-            out.append("\n" + "\t" * w["tabs"])
-        elif w["tabs"] and not out:
-            out.append("\t" * w["tabs"])
-        elif out and not out[-1].endswith("\n") and not out[-1].endswith("\t"):
+    for k, w in enumerate(sorted(document["words"], key=lambda d: d["ord"])):
+        if k == 0:
+            out.append("\t" * int(w.get("tabs", 0)))
+        elif w.get("nl"):
+            out.append("\n" * int(w["nl"]) + "\t" * int(w.get("tabs", 0)))
+        else:
             out.append(" ")
         out.append(w["text"])
     return "".join(out)
@@ -1226,7 +1226,7 @@ async def doc_edit(payload: dict):
     regen = False
     # Dragging moves what you grabbed and nothing else; only operations that
     # change the text reflow the page, the way a word processor does.
-    reflow_ops = {"unpin", "delete", "retext", "opts"}
+    reflow_ops = {"unpin", "delete", "retext", "opts", "indent", "linebreak"}
 
     if op == "pin":
         u, v = sheet.uv(float(payload["x"]), float(payload["y"]))
@@ -1255,6 +1255,18 @@ async def doc_edit(payload: dict):
         for k, w in enumerate(sorted(document["words"], key=lambda d: d["ord"])):
             w["ord"] = k
         document["text"] = _rebuild_text(document)
+    elif op in ("indent", "linebreak"):
+        # Applied to the first word of the selection: that word and everything
+        # after it move, which is what pressing Tab or Enter in front of a
+        # selection does in a word processor.
+        d = int(payload.get("delta", 1))
+        sel = [w for w in sorted(document["words"], key=lambda x: x["ord"])
+               if w["id"] in set(ids)]
+        if sel:
+            key = "tabs" if op == "indent" else "nl"
+            first = sel[0]
+            first[key] = max(0, int(first.get(key, 0)) + d)
+            document["text"] = _rebuild_text(document)
     elif op == "opts":
         document.setdefault("opts", {}).update(payload.get("opts") or {})
     elif op == "retext":

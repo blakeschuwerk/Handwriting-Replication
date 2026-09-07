@@ -1580,8 +1580,6 @@ $('#p_ov').addEventListener('pointerdown', (e) => {
   const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
   const mx = e.clientX - r.left, my = e.clientY - r.top;
   let best = -1, bd = 16;
-  if (typeof drawWordChrome === 'function') drawWordChrome(ctx, k);
-  if (WE.mode === 'words') return;   // no sheet handles while editing words
   (paperGeom.quad || []).forEach((c, i) => {
     const d = Math.hypot(c[0] * k - mx, c[1] * k - my);
     if (d < bd) { bd = d; best = i; }
@@ -1629,7 +1627,7 @@ $('#p_ov').addEventListener('pointerup', async (e) => {
 // Canvas, not DOM nodes. The box editor rebuilds every element on each mouse
 // move; at a few hundred words over a 4032px photo that is unusable.
 const WE = { doc: null, sel: new Set(), sprites: new Map(), mode: 'lines',
-             drag: null, marquee: null, dirty: false };
+             drag: null, range: false, anchor: null, dirty: false };
 
 function wordsOn() { return WE.mode === 'words'; }
 
@@ -1639,6 +1637,7 @@ function setMode(m) {
   $('#p_modeWords').classList.toggle('on', m === 'words');
   $('#p_wordHelp').classList.toggle('hidden', m !== 'words');
   $('#p_ov').style.cursor = m === 'words' ? 'default' : 'crosshair';
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   if (m === 'words' && !WE.doc) loadDoc();
   drawRules(); drawWords();
 }
@@ -1747,13 +1746,6 @@ function drawWordChrome(ctx, k) {
       ctx.fillStyle = '#f0a020'; ctx.fill();
     }
   }
-  if (WE.marquee) {
-    const m = WE.marquee;
-    ctx.strokeStyle = 'rgba(124,131,253,.9)'; ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
-    ctx.strokeRect(Math.min(m.x0, m.x1), Math.min(m.y0, m.y1),
-                   Math.abs(m.x1 - m.x0), Math.abs(m.y1 - m.y0));
-    ctx.setLineDash([]);
-  }
 }
 
 function hitWord(px, py) {
@@ -1766,28 +1758,50 @@ function hitWord(px, py) {
   return null;
 }
 
+// Where in the text does this point sit? Used so a drag selects a *range* of
+// words in reading order rather than only the ones the cursor physically
+// crossed -- dragging across two lines in any editor selects the end of the
+// first line and the start of the second, not a rectangle.
+function docIndexAt(px, py) {
+  const ws = WE.doc.words.filter(w => w.x !== undefined && !w.overflow);
+  if (!ws.length) return null;
+  let line = null, bestDy = Infinity;
+  for (const w of ws) {
+    const dy = Math.abs(py - (w.y + w.h / 2));
+    if (dy < bestDy) { bestDy = dy; line = w.line; }
+  }
+  const row = ws.filter(w => w.line === line).sort((a, b) => a.x - b.x);
+  let pick = row[row.length - 1];
+  for (const w of row) { if (px < w.x + w.w) { pick = w; break; } }
+  return WE.doc.words.indexOf(pick);
+}
+
+function selectRange(a, b) {
+  const [lo, hi] = a <= b ? [a, b] : [b, a];
+  WE.sel.clear();
+  for (let i = lo; i <= hi; i++) if (WE.doc.words[i]) WE.sel.add(WE.doc.words[i].id);
+}
+
 $('#p_ov').addEventListener('pointerdown', (e) => {
   if (!wordsOn() || !WE.doc) return;
   const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
   const px = (e.clientX - r.left) / k, py = (e.clientY - r.top) / k;
   const hit = hitWord(px, py);
-  if (hit) {
-    if (e.shiftKey) {
-      // extend in document order, like a text range
-      const ids = WE.doc.words.map(w => w.id);
-      const anchorIdx = ids.indexOf([...WE.sel][WE.sel.size - 1] ?? hit.id);
-      const [a, b] = [anchorIdx, ids.indexOf(hit.id)].sort((x, y) => x - y);
-      for (let i = a; i <= b; i++) WE.sel.add(ids[i]);
-    } else if (e.metaKey || e.ctrlKey) {
-      WE.sel.has(hit.id) ? WE.sel.delete(hit.id) : WE.sel.add(hit.id);
-    } else if (!WE.sel.has(hit.id)) {
-      WE.sel.clear(); WE.sel.add(hit.id);
-    }
+  const idx = hit ? WE.doc.words.indexOf(hit) : docIndexAt(px, py);
+
+  if (hit && e.shiftKey && WE.anchor != null) {
+    selectRange(WE.anchor, idx);
+  } else if (hit && (e.metaKey || e.ctrlKey)) {
+    WE.sel.has(hit.id) ? WE.sel.delete(hit.id) : WE.sel.add(hit.id);
+    WE.anchor = idx;
+  } else if (hit && WE.sel.has(hit.id)) {
+    // pressing inside an existing selection starts a move, as in a word
+    // processor -- selecting is what you do to text you have not selected yet
     WE.drag = { dx: 0, dy: 0, x0: px, y0: py, moved: false };
   } else {
-    if (!e.shiftKey) WE.sel.clear();
-    WE.marquee = { x0: e.clientX - r.left, y0: e.clientY - r.top,
-                   x1: e.clientX - r.left, y1: e.clientY - r.top, px0: px, py0: py };
+    WE.anchor = idx;
+    if (idx != null) selectRange(idx, idx); else WE.sel.clear();
+    WE.range = true;
   }
   cv.setPointerCapture(e.pointerId);
   selInfo(); drawRules(); scheduleWords();
@@ -1795,23 +1809,16 @@ $('#p_ov').addEventListener('pointerdown', (e) => {
 });
 
 $('#p_ov').addEventListener('pointermove', (e) => {
-  if (!wordsOn()) return;
+  if (!wordsOn() || !WE.doc) return;
   const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
   const px = (e.clientX - r.left) / k, py = (e.clientY - r.top) / k;
   if (WE.drag) {
     WE.drag.dx = px - WE.drag.x0; WE.drag.dy = py - WE.drag.y0;
     if (Math.abs(WE.drag.dx) + Math.abs(WE.drag.dy) > 2) WE.drag.moved = true;
     scheduleWords(); drawRules();
-  } else if (WE.marquee) {
-    WE.marquee.x1 = e.clientX - r.left; WE.marquee.y1 = e.clientY - r.top;
-    const x0 = Math.min(WE.marquee.px0, px), x1 = Math.max(WE.marquee.px0, px);
-    const y0 = Math.min(WE.marquee.py0, py), y1 = Math.max(WE.marquee.py0, py);
-    WE.sel.clear();
-    for (const w of WE.doc.words) {
-      if (w.x === undefined || w.overflow) continue;
-      if (w.x + w.w > x0 && w.x < x1 && w.y + w.h > y0 && w.y < y1) WE.sel.add(w.id);
-    }
-    selInfo(); drawRules();
+  } else if (WE.range && WE.anchor != null) {
+    const idx = docIndexAt(px, py);
+    if (idx != null) { selectRange(WE.anchor, idx); selInfo(); drawRules(); }
   }
 });
 
@@ -1819,11 +1826,10 @@ $('#p_ov').addEventListener('pointerup', async (e) => {
   if (!wordsOn()) return;
   const cv = $('#p_ov');
   try { cv.releasePointerCapture(e.pointerId); } catch (_) {}
-  if (WE.marquee) { WE.marquee = null; drawRules(); return; }
+  if (WE.range) { WE.range = false; drawRules(); return; }
   if (!WE.drag) return;
   const d = WE.drag; WE.drag = null;
   if (!d.moved || !WE.sel.size) { drawRules(); scheduleWords(); return; }
-  // drop position of the first selected word decides where the group pins
   const ids = [...WE.sel];
   const first = WE.doc.words.find(w => ids.includes(w.id) && w.x !== undefined);
   if (!first) return;
@@ -1842,6 +1848,20 @@ document.addEventListener('keydown', async (e) => {
     e.preventDefault();
     WE.doc.words.forEach(w => { if (!w.overflow) WE.sel.add(w.id); });
     selInfo(); drawRules(); return;
+  }
+  // Tab and Enter are swallowed unconditionally while editing words. Left to
+  // the browser they walk the page's own focus ring, and the next keypress
+  // then drives whatever control it landed on -- which is how pressing Enter
+  // ended up moving every ruled line instead of the text.
+  if (e.key === 'Tab') {
+    e.preventDefault(); e.stopPropagation();
+    if (WE.sel.size) await edit('indent', { delta: e.shiftKey ? -1 : 1 });
+    return;
+  }
+  if (e.key === 'Enter') {
+    e.preventDefault(); e.stopPropagation();
+    if (WE.sel.size) await edit('linebreak', { delta: e.shiftKey ? -1 : 1 });
+    return;
   }
   if (!WE.sel.size) return;
   if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); await edit('delete'); WE.sel.clear(); selInfo(); drawRules(); return; }
@@ -1916,13 +1936,6 @@ $('#p_file').onchange = async (e) => {
 };
 
 // Tab indents instead of moving focus: this textarea is a writing surface.
-$('#p_text').addEventListener('keydown', (e) => {
-  if (e.key !== 'Tab') return;
-  e.preventDefault();
-  const t = e.target, a = t.selectionStart, b = t.selectionEnd;
-  t.value = t.value.slice(0, a) + '\t' + t.value.slice(b);
-  t.selectionStart = t.selectionEnd = a + 1;
-});
 
 $('#paperBtn').onclick = async () => {
   if (!$('#p_paper').value) { alert('Pick or upload a paper photo first.'); return; }
