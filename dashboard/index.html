@@ -538,6 +538,7 @@
       <div class="flex" style="flex-wrap:wrap;gap:8px">
         <button class="btn" id="paperBtn">Write it</button>
         <button class="btn ghost" id="p_export">Export full size</button>
+        <button class="btn ghost" id="p_clear">Clear page</button>
         <span class="muted" id="p_selInfo" style="font-size:12px"></span>
       </div>
       <div id="p_wordHelp" class="planbox hidden" style="margin-top:10px">
@@ -1498,7 +1499,8 @@ async function showPaper() {
   const n = $('#p_paper').value;
   if (!n) { detInfo('no paper photos yet — upload one'); return; }
   $('#p_img').src = '/img/paper/' + encodeURIComponent(n);
-  paperGeom = null; drawRules();
+  paperGeom = null; WE.doc = null; WE.sel.clear();
+  drawRules(); drawWords();
   detInfo('finding the ruled lines…');
   applyGeom(await (await fetch('/api/paper/detect?name=' + encodeURIComponent(n))).json());
 }
@@ -1667,7 +1669,9 @@ async function loadDoc() {
   const n = $('#p_paper').value; if (!n) return;
   const r = await (await fetch('/api/doc?name=' + encodeURIComponent(n))).json();
   if (r.error) { detInfo('document: ' + r.error); return; }
-  WE.doc = r; selInfo(); drawWords();
+  WE.doc = r;
+  if (typeof r.text === 'string' && r.text) $('#p_text').value = r.text;
+  selInfo(); drawWords();
 }
 
 async function docPost(url, body) {
@@ -1679,7 +1683,14 @@ async function docPost(url, body) {
   if (d.error) { detInfo(d.error); return null; }
   // Only adopt responses that are actually a document; /render answers with a
   // URL, and assigning that here would wipe the in-memory page.
-  if (Array.isArray(d.words)) { WE.doc = d; selInfo(); drawWords(); }
+  if (Array.isArray(d.words)) {
+    WE.doc = d;
+    // Editing on the canvas rewrites the source text, so the box always shows
+    // what is actually on the page. Letting them drift is what made "Write it"
+    // and "Edit words" show different documents.
+    if (typeof d.text === 'string' && d.text !== $('#p_text').value) $('#p_text').value = d.text;
+    selInfo(); drawWords();
+  }
   return d;
 }
 
@@ -1859,12 +1870,23 @@ document.addEventListener('keydown', async (e) => {
 $('#p_export').onclick = async () => {
   detInfo('rendering at full size…');
   const r = await docPost('/api/doc/render', { token: Date.now().toString(36) });
-  if (r && r.url) {
-    $('#paperShot').innerHTML = `<img src="${r.url}?t=${Date.now()}" style="max-width:100%;border-radius:8px">`;
-    detInfo(`rendered ${r.drawn} words` + (r.overflow ? ` · ${r.overflow} past the last line` : ''));
-  }
+  if (!r || !r.url) { detInfo('export failed'); return; }
+  const t = Date.now();
+  $('#paperShot').innerHTML =
+    `<div class="muted" style="font-size:12px;margin:10px 0 6px">`
+    + `Full-size render &mdash; ${r.drawn} words, ${$('#p_img').naturalWidth}&times;${$('#p_img').naturalHeight}. `
+    + `The canvas above is a preview; this is the real composite. `
+    + `<a href="${r.url}?t=${t}" download style="color:var(--accent)">download</a></div>`
+    + `<img src="${r.url}?t=${t}" style="max-width:100%;border-radius:8px">`;
+  detInfo(`rendered ${r.drawn} words` + (r.overflow ? ` · ${r.overflow} past the last line` : ''));
 };
 
+$('#p_clear').onclick = async () => {
+  if (!confirm('Remove every word from this page?')) return;
+  WE.sel.clear();
+  await docPost('/api/doc/text', { text: '' });
+  detInfo('page cleared');
+};
 $('#p_seedNew').onclick = () => { $('#p_seed').value = Math.floor(Math.random() * 100000); };
 $('#p_paper').onchange = showPaper;
 $('#p_showlines').onchange = drawRules;
@@ -1902,23 +1924,80 @@ $('#p_text').addEventListener('keydown', (e) => {
   t.selectionStart = t.selectionEnd = a + 1;
 });
 
-$('#paperBtn').onclick = () => {
+$('#paperBtn').onclick = async () => {
   if (!$('#p_paper').value) { alert('Pick or upload a paper photo first.'); return; }
-  const token = Date.now().toString(36);
-  const q = new URLSearchParams({
-    name: $('#p_paper').value, text: $('#p_text').value, token,
-    style: $('#p_style').value || '', ckpt: $('#p_ckpt').value || 'pretrained',
-    scale: $('#p_scale').value, start_line: $('#p_start').value,
-    darkness: $('#p_dark').value, seed: $('#p_seed').value,
-  });
-  $('#paperShot').innerHTML = '';
   $('#paperBtn').disabled = true;
-  runStream('/api/paper/write?' + q, $('#paperLog'), (rc) => {
-    $('#paperBtn').disabled = false;
-    if (rc === '0') $('#paperShot').innerHTML =
-      `<img src="/img/paper/out_${token}.jpg?t=${Date.now()}" style="max-width:100%;border-radius:8px">`;
+  detInfo('generating the words…');
+  const r = await docPost('/api/doc/text', {
+    text: $('#p_text').value,
+    style: { crop: $('#p_style').value || null, ckpt: $('#p_ckpt').value || 'pretrained' },
+    opts: { start_line: +$('#p_start').value, scale: +$('#p_scale').value,
+            darkness: +$('#p_dark').value },
   });
+  $('#paperBtn').disabled = false;
+  if (!r) { detInfo('could not write the page'); return; }
+  detInfo(`${r.words.length} words on the page`
+    + (r.overflow ? ` · ${r.overflow} past the last line` : ''));
+  setMode('words');
 };
+
+$('#p_export').onclick = async () => {
+  detInfo('rendering at full size…');
+  const r = await docPost('/api/doc/render', { token: Date.now().toString(36) });
+  if (!r || !r.url) { detInfo('export failed'); return; }
+  const t = Date.now();
+  $('#paperShot').innerHTML =
+    `<div class="muted" style="font-size:12px;margin:10px 0 6px">`
+    + `Full-size render &mdash; ${r.drawn} words, ${$('#p_img').naturalWidth}&times;${$('#p_img').naturalHeight}. `
+    + `The canvas above is a preview; this is the real composite. `
+    + `<a href="${r.url}?t=${t}" download style="color:var(--accent)">download</a></div>`
+    + `<img src="${r.url}?t=${t}" style="max-width:100%;border-radius:8px">`;
+  detInfo(`rendered ${r.drawn} words` + (r.overflow ? ` · ${r.overflow} past the last line` : ''));
+};
+
+$('#p_clear').onclick = async () => {
+  if (!confirm('Remove every word from this page?')) return;
+  WE.sel.clear();
+  await docPost('/api/doc/text', { text: '' });
+  detInfo('page cleared');
+};
+$('#p_seedNew').onclick = () => { $('#p_seed').value = Math.floor(Math.random() * 100000); };
+$('#p_paper').onchange = showPaper;
+$('#p_showlines').onchange = drawRules;
+$('#p_showconf').onchange = drawRules;
+$('#p_img').onload = () => { drawRules(); drawWords(); };
+window.addEventListener('resize', () => { scheduleDraw(); scheduleWords(); });
+
+$('#p_topPlus').onclick = () => adjust({ add_top: 1 });
+$('#p_topMinus').onclick = () => adjust({ add_top: -1 });
+$('#p_botPlus').onclick = () => adjust({ add_bottom: 1 });
+$('#p_botMinus').onclick = () => adjust({ add_bottom: -1 });
+$('#p_resnap').onclick = () => { detInfo('snapping to the ink…'); adjust({ resnap: true }); };
+$('#p_redetect').onclick = async () => {
+  detInfo('re-detecting…');
+  applyGeom(await (await fetch('/api/paper/detect?rebuild=true&name='
+    + encodeURIComponent($('#p_paper').value))).json());
+};
+
+$('#p_file').onchange = async (e) => {
+  const fd = new FormData();
+  [...e.target.files].forEach(f => fd.append('files', f));
+  detInfo('uploading…');
+  const r = await (await fetch('/api/paper/upload', { method: 'POST', body: fd })).json();
+  e.target.value = '';
+  await loadPapers();
+  if (r.saved && r.saved.length) { $('#p_paper').value = r.saved[0]; await showPaper(); }
+};
+
+// Tab indents instead of moving focus: this textarea is a writing surface.
+$('#p_text').addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab') return;
+  e.preventDefault();
+  const t = e.target, a = t.selectionStart, b = t.selectionEnd;
+  t.value = t.value.slice(0, a) + '\t' + t.value.slice(b);
+  t.selectionStart = t.selectionEnd = a + 1;
+});
+
 
 </script>
 </body>

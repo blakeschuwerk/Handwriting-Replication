@@ -1086,38 +1086,6 @@ async def paper_adjust(payload: dict):
     return _paper.sheet_json(sh, st["flat"])
 
 
-@app.get("/api/paper/write")
-def paper_write(name: str, text: str, token: str, style: str = "",
-                ckpt: str = "pretrained", scale: float = 1.05,
-                start_line: int = 0, darkness: float = 0.22, seed: int = 0,
-                use_sheet: bool = True):
-    PAPER.mkdir(parents=True, exist_ok=True)
-    token = re.sub(r"[^A-Za-z0-9_-]", "", token)[:40] or "run"
-    out = PAPER / f"out_{token}.jpg"
-    args = [
-        str(SCRIPTS / "paper.py"),
-        "--photo", str(_paper_path(name)),
-        "--text", text,
-        "--output", str(out),
-        "--device", "mps",
-        "--scale", str(scale),
-        "--start-line", str(start_line),
-        "--darkness", str(darkness),
-        "--seed", str(seed),
-    ]
-    # Hand the edited sheet to the renderer, or the user's corrections would be
-    # thrown away and detection would simply run again.
-    if use_sheet and name in _PAPER:
-        sp = PAPER / f"sheet_{token}.json"
-        sp.write_text(json.dumps(_PAPER[name]["sheet"].to_json()))
-        args += ["--sheet", str(sp)]
-    if style:
-        args += ["--style", str(SEGMENTED / style)]
-    if ckpt and ckpt != "pretrained":
-        args += ["--ckpt", str(CHECKPOINTS / ckpt)]
-    return StreamingResponse(stream_script(args), media_type="text/event-stream")
-
-
 # ---- editable document -----------------------------------------------------
 # All page geometry stays on this side. The browser receives each word already
 # placed in photo pixels and sends back pixel positions; it never reimplements
@@ -1214,7 +1182,13 @@ def doc_get(name: str):
         return {"error": str(exc)[:400]}
     document = _load_doc(name, st["sheet"])
     document["sheet"] = st["sheet"].to_json()
-    _doc.reflow(document, st["sheet"])
+    # Only lay out a document that has never been laid out. Reflowing on every
+    # read looked harmless but made reads and writes disagree: the view showed a
+    # freshly reflowed page while the stored positions were the old ones, so the
+    # next edit appeared to move everything back.
+    if any(w.get("placed") is None and not w.get("overflow") for w in document["words"]):
+        _doc.reflow(document, st["sheet"])
+        _doc.save(str(_doc_path(name)), document)
     return doc_view(document, st["sheet"])
 
 
