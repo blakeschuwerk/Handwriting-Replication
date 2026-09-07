@@ -34,6 +34,8 @@ from PIL import Image
 from scipy.ndimage import binary_closing
 from scipy.signal import find_peaks
 
+import sheet as _sheet
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from render_page import ink_alpha  # noqa: E402
 
@@ -204,6 +206,164 @@ def _robust_line(i, v):
             break
         a, b = np.polyfit(i[keep], v[keep], 1)
     return float(a), float(b)
+
+
+def detect_margin_x(bgr, y_lo=None, y_hi=None):
+    """The printed red margin, as an x in pixels, or None.
+
+    Found in red-minus-blue for the same reason rules are found in
+    blue-minus-red: it isolates one ink colour and, being a channel
+    difference, cancels the lighting gradient. The margin matters beyond
+    cosmetics -- it anchors page-space u=0, so word positions stay meaningful
+    across a re-fit.
+    """
+    b, _, r = cv2.split(bgr.astype(np.float32))
+    resp = r - b
+    resp = resp - cv2.GaussianBlur(resp, (0, 0), BLUE_SIGMA)
+    H, W = resp.shape
+    y_lo = int(y_lo if y_lo is not None else H * 0.3)
+    y_hi = int(y_hi if y_hi is not None else H * 0.85)
+    prof = resp[y_lo:y_hi, :].mean(axis=0)
+    prof = prof - np.median(prof)
+    pk, props = find_peaks(prof, prominence=prof.std() * 1.5, distance=60)
+    if not len(pk):
+        return None
+    return pk, props["prominences"]
+
+
+def _pick_margin(cands, x_min, x_max):
+    """Choose the margin from red-line candidates: the strongest one sitting
+    near the left edge of the ruling. A notebook often prints a red line down
+    both sides, so 'strongest overall' picks the wrong one."""
+    if cands is None:
+        return None
+    pk, prom = cands
+    span = x_max - x_min
+    ok = [(x, p) for x, p in zip(pk, prom)
+          if x_min - 0.10 * span <= x <= x_min + 0.35 * span]
+    if not ok:
+        return None
+    return float(max(ok, key=lambda t: t[1])[0])
+
+
+def _rule_observations(flat, rules, spacing, step=50, half=25):
+    """Dense (x, y, line_index) samples of the real ink.
+
+    The slab tracker gives one point per rule per slab -- enough to seed, too
+    few to fit well. This resamples finely and assigns each peak to the nearest
+    tracked rule, which is what turns ~450 coarse points into ~1100 good ones.
+    """
+    H, W = flat.shape
+    # Only sample where the tracked rules actually carry ink. Sampling the full
+    # width pulls in the facing page and the desk, and a stray peak there can
+    # be assigned to a rule and survive as a plausible-looking inlier.
+    ex = [e for e in (_extent(flat, r) for r in rules) if e]
+    if ex:
+        x_lo = int(np.median([e[0] for e in ex]))
+        x_hi = int(np.median([e[1] for e in ex]))
+        pad = int(0.12 * max(x_hi - x_lo, 1))
+        x_lo, x_hi = max(step, x_lo - pad), min(W - step, x_hi + pad)
+    else:
+        x_lo, x_hi = step, W - step
+    obs = []
+    for x in range(x_lo, x_hi, step):
+        pred = np.array([np.polyval(r["poly"], x) for r in rules])
+        lo = max(int(pred.min()) - int(spacing), 0)
+        hi = min(int(pred.max()) + int(spacing), H)
+        if hi - lo < 10:
+            continue
+        col = flat[lo:hi, max(0, x - half):x + half].mean(axis=1)
+        col = col - col.min()
+        if col.max() <= 0:
+            continue
+        pk, _ = find_peaks(col, distance=max(8, spacing * 0.55),
+                           prominence=col.std() * 0.8)
+        for q in pk + lo:
+            j = int(np.argmin(np.abs(pred - q)))
+            if abs(pred[j] - q) < spacing * 0.35:
+                obs.append((x, float(q), j))
+    return np.array(obs, float) if obs else np.zeros((0, 3))
+
+
+def _observations_from_sheet(flat, sheet, spacing, step=50, half=25):
+    """Re-collect ink observations using a fitted sheet as the predictor.
+
+    Run after the grid has been extended, so the rules added at the edges get
+    real observations behind them instead of pure extrapolation.
+    """
+    H, W = flat.shape
+    lines = np.arange(sheet.i_first, sheet.i_first + sheet.n_lines, dtype=float)
+    obs = []
+    for x in range(step, W - step, step):
+        _, ys = sheet.xy(lines, np.full(lines.size, 0.0))
+        ys = sheet.xy(lines, np.full(lines.size, float(sheet.uv(x, H / 2)[0][0])))[1]
+        lo = max(int(ys.min()) - int(spacing), 0)
+        hi = min(int(ys.max()) + int(spacing), H)
+        if hi - lo < 10:
+            continue
+        col = flat[lo:hi, max(0, x - half):x + half].mean(axis=1)
+        col = col - col.min()
+        if col.max() <= 0:
+            continue
+        pk, _ = find_peaks(col, distance=max(8, spacing * 0.55),
+                           prominence=col.std() * 0.8)
+        for q in pk + lo:
+            j = int(np.argmin(np.abs(ys - q)))
+            if abs(ys[j] - q) < spacing * 0.35:
+                obs.append((x, float(q), float(lines[j])))
+    return np.array(obs, float) if obs else np.zeros((0, 3))
+
+
+def _anchor(sheet, bgr, flat):
+    """Put u=0 on the printed margin and set the writing area from the ink.
+
+    Must be redone after every fit: each fit chooses its own u origin, so
+    carrying old u values onto a refitted sheet silently shifts the margin and
+    the right edge across the page.
+    """
+    b, _, r = cv2.split(bgr.astype(np.float32))
+    red = (r - b) - cv2.GaussianBlur(r - b, (0, 0), BLUE_SIGMA)
+    lo, hi = _sheet.find_extent_u(sheet, flat)
+    sheet.u_left, sheet.u_right = lo, hi
+    mu = _sheet.find_margin_u(sheet, red)
+    if mu is not None:
+        sheet.shift_u(-mu)
+        sheet.u_left = 0.0        # writing starts at the margin
+        sheet.margin_x = float(sheet.point(sheet.i_first + sheet.n_lines // 2, 0.0)[0])
+    return sheet
+
+
+def detect_sheet(bgr):
+    """Photo -> (Sheet, observations, info). The replacement for detect_ruling."""
+    H, W = bgr.shape[:2]
+    flat = _flat_response(bgr)
+    spacing = _estimate_spacing(flat[:, W // 2 - 100:W // 2 + 100].mean(axis=1))
+    if not spacing:
+        raise ValueError("no ruling detected -- is the paper ruled in blue?")
+    rules = _consistent_run(_track_rules(flat, spacing))
+    if len(rules) < 4:
+        raise ValueError(f"only {len(rules)} ruled lines found")
+
+    obs = _rule_observations(flat, rules, spacing)
+    if len(obs) < 30:
+        raise ValueError(f"only {len(obs)} rule observations")
+
+    sheet, info = _sheet.fit_sheet(obs, (W, H), spacing)
+    sheet = _anchor(sheet, bgr, flat)
+
+    # Grow onto rules the tracker missed, then re-observe and refit so the new
+    # rules rest on measured ink rather than on extrapolation.
+    sheet, grown = _sheet.extend_lines(sheet, flat)
+    if grown != (0, 0):
+        obs2 = _observations_from_sheet(flat, sheet, spacing)
+        if len(obs2) >= 30:
+            i0, n = sheet.i_first, sheet.n_lines
+            sheet, info = _sheet.fit_sheet(obs2, (W, H), spacing)
+            sheet.i_first, sheet.n_lines = i0, n
+            sheet = _anchor(sheet, bgr, flat)
+            obs = obs2
+    info["grown"] = grown
+    return sheet, obs, info
 
 
 def detect_ruling(bgr):
