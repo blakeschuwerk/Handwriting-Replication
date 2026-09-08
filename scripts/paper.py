@@ -324,7 +324,11 @@ def _anchor(sheet, bgr, flat):
     b, _, r = cv2.split(bgr.astype(np.float32))
     red = (r - b) - cv2.GaussianBlur(r - b, (0, 0), BLUE_SIGMA)
     lo, hi = _sheet.find_extent_u(sheet, flat)
-    sheet.u_left, sheet.u_right = lo, hi
+    # A writing area narrower than a few line heights is not a page of ruled
+    # paper, it is a failed search. Keeping it would also squeeze the bow's
+    # domain, which is what turns a poor fit into a catastrophic one.
+    if hi - lo >= 4.0:
+        sheet.u_left, sheet.u_right = lo, hi
     mu = _sheet.find_margin_u(sheet, red)
     if mu is not None:
         sheet.shift_u(-mu)
@@ -333,20 +337,102 @@ def _anchor(sheet, bgr, flat):
     return sheet
 
 
+def _paper_mask(bgr):
+    """A coarse mask of the pixels that are actually the sheet of paper.
+
+    Rules are found by looking for a regular periodic pattern, so anything else
+    periodic in the frame competes with them. Measured on a photo with a laptop
+    in shot: columns over the page read 22-25 rules at a ~94px pitch, while
+    columns over the keyboard read 43-44 at 66px, and the detector had no way to
+    prefer one over the other.
+
+    This is deliberately a mask and not the page outline. This module never fits
+    the paper's edges -- on an open notebook both pages merge into one blob --
+    but excluding obvious non-paper is a much weaker claim than finding a
+    border, and being generous about it is safe. If the result does not look
+    like a sheet of paper, nothing is masked at all rather than risk making a
+    working photo worse.
+    """
+    f = bgr.astype(np.float32) + 1.0
+    v = f.max(2)
+    sat = 1.0 - f.min(2) / v
+    # Flat-field the brightness first, so a page falling into shadow at one
+    # corner still counts as paper.
+    vn = v / (cv2.GaussianBlur(v, (0, 0), max(bgr.shape[:2]) * 0.08) + 1e-6)
+    m = ((vn > 0.82) & (sat < 0.35)).astype(np.uint8)
+    k = np.ones((9, 9), np.uint8)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k, iterations=3)
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, k, iterations=2)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
+    if n > 1:
+        big = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        m = (lab == big).astype(np.uint8)
+    if m.mean() < 0.15:
+        return np.ones(bgr.shape[:2], np.float32)
+    return cv2.GaussianBlur(m.astype(np.float32), (0, 0), 9)
+
+
+def _rule_angle(resp, span=40.0):
+    """The dominant direction of the ruling, in degrees.
+
+    ``_track_rules`` follows rules by averaging inside vertical slabs, which
+    only holds while a rule stays roughly level across one slab. At 15 degrees
+    of tilt a rule falls 38px inside a 136px slab against a 145px spacing, so
+    the peaks smear into one another and tracking wanders. Measuring the angle
+    first and tracking in a frame where the rules are level restores the
+    assumption the tracker was written around; the perspective fan that remains
+    is what the sheet model is for.
+    """
+    h, w = resp.shape
+    c = resp[h // 4:3 * h // 4, w // 4:3 * w // 4]
+    sc = 400.0 / max(c.shape)
+    if sc < 1.0:
+        c = cv2.resize(c, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
+    c = (c - c.mean()) / (c.std() + 1e-6)
+    ch, cw = c.shape
+    best = (0.0, -1.0)
+    for step, lo, hi in ((2.0, -span, span), (0.25, None, None)):
+        if lo is None:
+            lo, hi = best[0] - 2.0, best[0] + 2.0
+        for a in np.arange(lo, hi + 1e-9, step):
+            M = cv2.getRotationMatrix2D((cw / 2.0, ch / 2.0), float(a), 1.0)
+            r = cv2.warpAffine(c, M, (cw, ch), borderValue=0.0)
+            j = cw // 4
+            val = float(r[:, j:-j].mean(1).var())
+            if val > best[1]:
+                best = (float(a), val)
+    return best[0]
+
+
 def detect_sheet(bgr):
     """Photo -> (Sheet, observations, info). The replacement for detect_ruling."""
     H, W = bgr.shape[:2]
-    flat = _flat_response(bgr)
-    spacing = _estimate_spacing(flat[:, W // 2 - 100:W // 2 + 100].mean(axis=1))
+    flat = _flat_response(bgr) * _paper_mask(bgr)
+
+    # Find the rules in a frame where they are level, then bring the
+    # observations back into photo coordinates. Only the tracking runs rotated;
+    # everything downstream keeps working in the photo's own space.
+    ang = _rule_angle(flat)
+    if abs(ang) > 1.5:
+        R = cv2.getRotationMatrix2D((W / 2.0, H / 2.0), ang, 1.0)
+        track = cv2.warpAffine(flat, R, (W, H), borderValue=0.0)
+        Rinv = cv2.invertAffineTransform(R)
+    else:
+        track, Rinv, ang = flat, None, 0.0
+
+    spacing = _estimate_spacing(track[:, W // 2 - 100:W // 2 + 100].mean(axis=1))
     if not spacing:
         raise ValueError("no ruling detected -- is the paper ruled in blue?")
-    rules = _consistent_run(_track_rules(flat, spacing))
+    rules = _consistent_run(_track_rules(track, spacing))
     if len(rules) < 4:
         raise ValueError(f"only {len(rules)} ruled lines found")
 
-    obs = _rule_observations(flat, rules, spacing)
+    obs = _rule_observations(track, rules, spacing)
     if len(obs) < 30:
         raise ValueError(f"only {len(obs)} rule observations")
+    if Rinv is not None:
+        xy = obs[:, :2] @ Rinv[:, :2].T + Rinv[:, 2]
+        obs = np.column_stack([xy, obs[:, 2]])   # rotation preserves spacing
 
     sheet, info = _sheet.fit_sheet(obs, (W, H), spacing)
     sheet = _anchor(sheet, bgr, flat)
@@ -358,11 +444,22 @@ def detect_sheet(bgr):
         obs2 = _observations_from_sheet(flat, sheet, spacing)
         if len(obs2) >= 30:
             i0, n = sheet.i_first, sheet.n_lines
-            sheet, info = _sheet.fit_sheet(obs2, (W, H), spacing)
-            sheet.i_first, sheet.n_lines = i0, n
-            sheet = _anchor(sheet, bgr, flat)
-            obs = obs2
+            cand, cinfo = _sheet.fit_sheet(obs2, (W, H), spacing)
+            cand.i_first, cand.n_lines = i0, n
+            cand = _anchor(cand, bgr, flat)
+            # Only adopt the refit if it actually fits better. Lines grown into
+            # a washed-out edge carry few observations, and on a steeply angled
+            # photo they dragged the solution from 2px to 14px -- the refit is
+            # an optimisation, so it has to earn its place.
+            before = float(np.mean(np.abs(_sheet.residuals_px(sheet, obs2))))
+            after = float(np.mean(np.abs(_sheet.residuals_px(cand, obs2))))
+            if after <= before:
+                sheet, info, obs = cand, cinfo, obs2
     info["grown"] = grown
+    res = np.abs(_sheet.residuals_px(sheet, obs))
+    info["resid_mean"] = round(float(res.mean()), 2)
+    info["resid_max"] = round(float(res.max()), 2)
+    info["angle"] = round(ang, 2)
     return sheet, obs, info
 
 

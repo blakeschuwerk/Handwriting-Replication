@@ -100,7 +100,13 @@ class Sheet:
         return (np.asarray(u, float) - self.u_left) / span
 
     def _bow(self, u):
-        t = self._t(u)
+        # t is clamped because the bow is parameterised on the writing area,
+        # which the user and _anchor can both move. If that span ever collapses,
+        # t runs far outside [0,1] and this cubic explodes -- turning a merely
+        # poor fit into residuals of tens of thousands of pixels. The bow is
+        # only meaningful across the page, so extrapolating it wildly beyond the
+        # edges is never right anyway.
+        t = np.clip(self._t(u), -0.25, 1.25)
         return self.c1 * t * (1 - t) + self.c2 * t * (1 - t) * (2 * t - 1)
 
     # -- image -> page -----------------------------------------------------
