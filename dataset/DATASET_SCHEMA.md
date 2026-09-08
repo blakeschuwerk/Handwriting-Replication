@@ -9,7 +9,7 @@ so it can be loaded through the unmodified FW-GAN loader.
 
 | dataset | shape | dtype | meaning |
 |---|---|---|---|
-| `imgs` | `(32, 35877)` | uint8 | All word images concatenated horizontally, fixed height 32. |
+| `imgs` | `(32, 47279)` | uint8 | All word images concatenated horizontally, fixed height 32. |
 | `img_lens` | `(N,)` | int16 | Width (columns) of each sample. |
 | `img_seek_idxs` | `(N,)` | int64 | Start column of each sample in `imgs` (prefix sum of `img_lens`). |
 | `lbs` | `(sum(L),)` | int32 | All label texts concatenated as Unicode code points (`ord(char)`). |
@@ -40,8 +40,8 @@ transcription accuracy.
 
 ## Packaging run summary
 
-- Samples packaged: 530
-- Samples skipped: 4
+- Samples packaged: 703
+- Samples skipped: 7
 
 ### Skip reasons
 
@@ -49,5 +49,8 @@ transcription accuracy.
 - `Screenshot_2026-09-02_at_5.53.43_PM__8ab07e1718.png`: chars not in alphabet: ['→'] (text='→')
 - `Screenshot_2026-09-02_at_5.53.43_PM__29cd1a5de0.png`: chars not in alphabet: ['='] (text='=')
 - `Screenshot_2026-09-02_at_5.53.43_PM__48ad43bd0c.png`: chars not in alphabet: ['='] (text='=')
+- `Screenshot_2026-09-02_at_5.53.45_PM__7158a763cd.png`: chars not in alphabet: ['→'] (text='→')
+- `Screenshot_2026-09-02_at_5.53.45_PM__8d89779fba.png`: chars not in alphabet: ['→'] (text='→')
+- `Screenshot_2026-09-02_at_5.53.45_PM__188a78fac5.png`: chars not in alphabet: ['→'] (text='→')
 
-- Final `imgs` shape: (32, 35877), dtype: uint8
+- Final `imgs` shape: (32, 47279), dtype: uint8
