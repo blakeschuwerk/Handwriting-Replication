@@ -285,6 +285,8 @@
   .hd.e  { right: -6px; top: 50%; margin-top: -5px; cursor: ew-resize; }
   #edText { width: 190px; }
   kbd { background: var(--panel2); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; font-size: 11px; font-family: inherit; }
+  /* Says plainly which surface owns the keyboard. */
+  #p_preview:focus { box-shadow: 0 0 0 3px rgba(90,150,255,.75); }
 </style>
 </head>
 <body>
@@ -499,7 +501,10 @@
         <label class="fld"><span>Upload a photo (HEIC fine)</span><input type="file" id="p_file" accept=".jpg,.jpeg,.png,.heic,.heif" multiple></label>
       </div>
 
-      <div id="p_preview" style="position:relative;display:inline-block;max-width:100%">
+      <!-- tabindex makes this a real focus owner. Without it the canvas cannot
+           hold focus, so keystrokes went to whichever button was last clicked:
+           Space activated it and Tab walked the focus ring along the toolbar. -->
+      <div id="p_preview" tabindex="0" style="position:relative;display:inline-block;max-width:100%;outline:none;border-radius:8px">
         <img id="p_img" alt="paper" style="max-width:100%;border-radius:8px;display:block">
         <canvas id="p_words" style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;mix-blend-mode:multiply"></canvas>
         <canvas id="p_ov" style="position:absolute;left:0;top:0;width:100%;height:100%;cursor:crosshair;touch-action:none"></canvas>
@@ -1912,6 +1917,9 @@ function selectRange(a, b) {
 }
 
 $('#p_ov').addEventListener('pointerdown', (e) => {
+  // Take the keyboard first, whatever mode we are in. pointerdown calls
+  // preventDefault below, which suppresses the browser's own focus handling.
+  $('#p_preview').focus();
   if (!wordsOn() || !WE.doc) return;
   const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
   const px = (e.clientX - r.left) / k, py = (e.clientY - r.top) / k;
@@ -1966,13 +1974,37 @@ $('#p_ov').addEventListener('pointerup', async (e) => {
   drawRules();
 });
 
-// keyboard: only while the words mode is on and focus is not in a text field
+// Does the image own the keyboard right now?
+const imgHasKeys = () => {
+  const box = $('#p_preview');
+  return !!box && (document.activeElement === box || box.contains(document.activeElement));
+};
+
+// Keyboard routing. The gate is *focus*, not the editing mode: previously this
+// checked `wordsOn() && WE.doc`, so before a document existed every key fell
+// through to the browser. Worse, the target check excluded inputs but not
+// buttons, and Space was never handled at all -- so a focused toolbar button
+// got activated by Space and Tab walked the focus ring. That is the whole of
+// the "half the time it just clicks the buttons below the image" bug.
 document.addEventListener('keydown', async (e) => {
-  if (!wordsOn() || !WE.doc) return;
+  if (!imgHasKeys()) return;
   const t = e.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+
+  // Every key that can move focus or press a control is swallowed while the
+  // image holds the keyboard, whether or not this one does anything with it.
+  if (['Tab', 'Enter', ' ', 'Spacebar', 'Backspace', 'Delete',
+       'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+    e.preventDefault(); e.stopPropagation();
+  }
+
+  // Esc hands the keyboard back to the page. Clicking outside the image does
+  // the same thing by simply blurring, so both routes are one behaviour --
+  // neither disturbs the selection.
+  if (e.key === 'Escape') { $('#p_preview').blur(); drawRules(); return; }
+
+  if (!wordsOn() || !WE.doc) return;
   const step = e.shiftKey ? 12 : 3;
-  if (e.key === 'Escape') { WE.sel.clear(); selInfo(); drawRules(); scheduleWords(); return; }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
     e.preventDefault();
     const r = await docPost('/api/doc/history', { dir: e.shiftKey ? 'redo' : 'undo' });
@@ -1985,22 +2017,16 @@ document.addEventListener('keydown', async (e) => {
     WE.doc.words.forEach(w => { if (!w.overflow) WE.sel.add(w.id); });
     selInfo(); drawRules(); return;
   }
-  // Tab and Enter are swallowed unconditionally while editing words. Left to
-  // the browser they walk the page's own focus ring, and the next keypress
-  // then drives whatever control it landed on -- which is how pressing Enter
-  // ended up moving every ruled line instead of the text.
   if (e.key === 'Tab') {
-    e.preventDefault(); e.stopPropagation();
     if (WE.sel.size) await edit('indent', { delta: e.shiftKey ? -1 : 1 });
     return;
   }
   if (e.key === 'Enter') {
-    e.preventDefault(); e.stopPropagation();
     if (WE.sel.size) await edit('linebreak', { delta: e.shiftKey ? -1 : 1 });
     return;
   }
   if (!WE.sel.size) return;
-  if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); await edit('delete'); WE.sel.clear(); selInfo(); drawRules(); return; }
+  if (e.key === 'Delete' || e.key === 'Backspace') { await edit('delete'); WE.sel.clear(); selInfo(); drawRules(); return; }
   if (e.key === 'r' || e.key === 'R') { e.preventDefault(); detInfo('re-rolling…'); await edit('reroll'); detInfo(''); return; }
   if (e.key === 'u' || e.key === 'U') { e.preventDefault(); await edit('unpin'); drawRules(); return; }
   if (e.key === 'e' || e.key === 'E') {
@@ -2023,54 +2049,10 @@ document.addEventListener('keydown', async (e) => {
   }
 });
 
-$('#p_export').onclick = async () => {
-  detInfo('rendering at full size…');
-  const r = await docPost('/api/doc/render', { token: Date.now().toString(36) });
-  if (!r || !r.url) { detInfo('export failed'); return; }
-  const t = Date.now();
-  $('#paperShot').innerHTML =
-    `<div class="muted" style="font-size:12px;margin:10px 0 6px">`
-    + `Full-size render &mdash; ${r.drawn} words, ${$('#p_img').naturalWidth}&times;${$('#p_img').naturalHeight}. `
-    + `The canvas above is a preview; this is the real composite. `
-    + `<a href="${r.url}?t=${t}" download style="color:var(--accent)">download</a></div>`
-    + `<img src="${r.url}?t=${t}" style="max-width:100%;border-radius:8px">`;
-  detInfo(`rendered ${r.drawn} words` + (r.overflow ? ` · ${r.overflow} past the last line` : ''));
-};
-
-$('#p_clear').onclick = async () => {
-  if (!confirm('Remove every word from this page?')) return;
-  WE.sel.clear();
-  await docPost('/api/doc/text', { text: '' });
-  detInfo('page cleared');
-};
-$('#p_seedNew').onclick = () => { $('#p_seed').value = Math.floor(Math.random() * 100000); };
-$('#p_paper').onchange = showPaper;
-$('#p_showlines').onchange = drawRules;
-$('#p_showconf').onchange = drawRules;
-$('#p_img').onload = () => { drawRules(); drawWords(); };
-window.addEventListener('resize', () => { scheduleDraw(); scheduleWords(); });
-
-$('#p_topPlus').onclick = () => adjust({ add_top: 1 });
-$('#p_topMinus').onclick = () => adjust({ add_top: -1 });
-$('#p_botPlus').onclick = () => adjust({ add_bottom: 1 });
-$('#p_botMinus').onclick = () => adjust({ add_bottom: -1 });
-$('#p_resnap').onclick = () => { detInfo('snapping to the ink…'); adjust({ resnap: true }); };
-$('#p_redetect').onclick = async () => {
-  detInfo('re-detecting…');
-  applyGeom(await (await fetch('/api/paper/detect?rebuild=true&name='
-    + encodeURIComponent($('#p_paper').value))).json());
-};
-
-$('#p_file').onchange = async (e) => {
-  const fd = new FormData();
-  [...e.target.files].forEach(f => fd.append('files', f));
-  detInfo('uploading…');
-  const r = await (await fetch('/api/paper/upload', { method: 'POST', body: fd })).json();
-  e.target.value = '';
-  await loadPapers();
-  if (r.saved && r.saved.length) { $('#p_paper').value = r.saved[0]; await showPaper(); }
-};
-
+// NOTE: a byte-for-byte copy of the handler block below used to sit here.
+// The .onclick assignments were idempotent so it looked harmless, but it
+// registered a second window 'resize' listener, so every resize scheduled
+// the redraw pair twice.
 // Tab indents instead of moving focus: this textarea is a writing surface.
 
 $('#paperBtn').onclick = async () => {
