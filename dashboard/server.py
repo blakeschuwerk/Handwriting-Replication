@@ -1050,14 +1050,31 @@ async def paper_adjust(payload: dict):
             u, v = sh.uv(float(x), float(y))
             us.append(float(u[0]))
             vs.append(float(v[0]))
-        # corners are TL, TR, BR, BL -- left/right from u, first/last from v,
-        # rounded because a rule index is by definition a whole number
-        sh.u_left = min(us[0], us[3])
-        sh.u_right = max(us[1], us[2])
+        # corners are TL, TR, BR, BL
+        corner = payload.get("corner")
         i0 = int(round(min(vs[0], vs[1])))
         i1 = int(round(max(vs[2], vs[3])))
+        if corner is None:
+            sh.u_left = min(us[0], us[3])
+            sh.u_right = max(us[1], us[2])
+        else:
+            # One handle moved, so that handle decides the two edges it lies on.
+            # Taking min/max across a pair instead meant the corner you were not
+            # dragging pinned the value: you could haul a handle right across the
+            # page and nothing moved, because its neighbour still held the old u.
+            c = int(corner) % 4
+            if c in (0, 3):
+                sh.u_left = us[c]
+            else:
+                sh.u_right = us[c]
+            if c in (0, 1):
+                i0 = int(round(vs[c]))
+            else:
+                i1 = int(round(vs[c]))
         if i1 > i0:
             sh.i_first, sh.n_lines = i0, i1 - i0 + 1
+        if sh.u_right - sh.u_left < 1.0:      # never let the area collapse
+            sh.u_left, sh.u_right = min(us[0], us[3]), max(us[1], us[2])
 
     if payload.get("margin_x") is not None:
         mx = float(payload["margin_x"])

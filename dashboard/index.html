@@ -1480,6 +1480,15 @@ setInterval(() => { if (!document.hidden) refreshStatus(); }, 6000);
 // ---- 6 · write on paper ----------------------------------------------------
 let paperGeom = null;      // last response from detect/adjust
 let dragCorner = null;     // index of the corner being dragged, or 'margin'
+
+// A writing area can legitimately extend past the edge of the photo, but a
+// handle drawn out there cannot be clicked. Keep it just inside instead.
+function handleAt(c, k, cv) {
+  const m = 10, x = c[0] * k, y = c[1] * k;
+  const cx = Math.min(cv.width - m, Math.max(m, x));
+  const cy = Math.min(cv.height - m, Math.max(m, y));
+  return { x: cx, y: cy, off: Math.abs(cx - x) > 0.5 || Math.abs(cy - y) > 0.5 };
+}
 let rafPending = false;
 
 async function loadPapers() {
@@ -1500,7 +1509,9 @@ function applyGeom(g) {
   // 1.0 == as much ink as a typical rule on this page
   const weak = conf.filter(c => c < 0.35).length;
   detInfo(`${g.count} ruled lines · spacing ${g.spacing}px`
-    + (weak ? ` · ${weak} line${weak > 1 ? 's' : ''} with weak ink — check the fit` : ''));
+    + (weak ? ` · ${weak} line${weak > 1 ? 's' : ''} with weak ink` : '')
+    + (g.margin_found === false
+        ? ' · margin not found — drag the dashed line onto yours' : ''));
   applyFitVerdict(g.fit, weak, conf.length);
   $('#p_start').max = Math.max(0, g.count - 1);
   if (+$('#p_start').value > +$('#p_start').max) $('#p_start').value = $('#p_start').max;
@@ -1592,17 +1603,28 @@ function drawRules() {
   });
 
   ctx.lineWidth = 2;
-  ctx.strokeStyle = 'rgba(255,80,80,.95)'; path(paperGeom.margin);
+  // Dashed amber means "we could not find your margin, this is a guess" --
+  // a solid red line claims a measurement that was never made.
+  if (paperGeom.margin_found === false) {
+    ctx.setLineDash([9, 6]); ctx.strokeStyle = 'rgba(240,160,60,.95)';
+    path(paperGeom.margin); ctx.setLineDash([]);
+  } else {
+    ctx.strokeStyle = 'rgba(255,80,80,.95)'; path(paperGeom.margin);
+  }
   ctx.strokeStyle = 'rgba(230,120,255,.85)'; path(paperGeom.right);
 
   if (typeof drawWordChrome === 'function') drawWordChrome(ctx, k);
   if (WE.mode === 'words') return;   // no sheet handles while editing words
   (paperGeom.quad || []).forEach((c, i) => {
-    const x = c[0] * k, y = c[1] * k;
-    ctx.beginPath(); ctx.arc(x, y, dragCorner === i ? 9 : 7, 0, 7);
-    ctx.fillStyle = dragCorner === i ? '#fff' : 'rgba(255,255,255,.85)';
+    const p = handleAt(c, k, cv);
+    ctx.beginPath(); ctx.arc(p.x, p.y, dragCorner === i ? 9 : 7, 0, 7);
+    // Hollow means the real corner is off the photo and this handle has been
+    // pulled to the edge so you can still reach it. Left as-is they sat
+    // outside the image entirely and the control looked broken.
+    ctx.fillStyle = p.off ? 'rgba(20,30,25,.55)'
+                          : (dragCorner === i ? '#fff' : 'rgba(255,255,255,.85)');
     ctx.fill();
-    ctx.lineWidth = 2; ctx.strokeStyle = '#1a7f4b'; ctx.stroke();
+    ctx.lineWidth = 2; ctx.strokeStyle = p.off ? '#f0a020' : '#1a7f4b'; ctx.stroke();
   });
 }
 
@@ -1620,7 +1642,8 @@ $('#p_ov').addEventListener('pointerdown', (e) => {
   const mx = e.clientX - r.left, my = e.clientY - r.top;
   let best = -1, bd = 16;
   (paperGeom.quad || []).forEach((c, i) => {
-    const d = Math.hypot(c[0] * k - mx, c[1] * k - my);
+    const p = handleAt(c, k, cv);
+    const d = Math.hypot(p.x - mx, p.y - my);
     if (d < bd) { bd = d; best = i; }
   });
   if (best < 0) {
@@ -1658,7 +1681,7 @@ $('#p_ov').addEventListener('pointerup', async (e) => {
     const m = paperGeom.margin[Math.floor(paperGeom.margin.length / 2)];
     await adjust({ margin_x: m[0] });
   } else {
-    await adjust({ quad: paperGeom.quad });
+    await adjust({ quad: paperGeom.quad, corner: which });
   }
 });
 

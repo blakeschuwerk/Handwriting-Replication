@@ -712,6 +712,10 @@ def sheet_json(sheet, response=None, n_points=24, obs=None):
         "right": guide(sheet.u_right),
         "quad": [[round(x, 1), round(y, 1)] for x, y in corners],
         "count": sheet.n_lines,
+        # The margin guide is only a measurement when this is true. Drawing a
+        # confident red line at an arbitrary u when the search failed is how it
+        # ended up 58px from the real margin with nothing saying so.
+        "margin_found": sheet.margin_x is not None,
         "i_first": sheet.i_first,
         "spacing": round(sheet.spacing_px(i0 + sheet.n_lines // 2,
                                           (sheet.u_left + sheet.u_right) / 2), 1),

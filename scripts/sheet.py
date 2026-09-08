@@ -360,7 +360,19 @@ def find_margin_u(sheet, red, search=(-8.0, 0.45), step=0.02):
         return None
     lines = np.arange(sheet.i_first, sheet.i_first + sheet.n_lines, 0.5)
     grid = sheet.sample(red, lines, us)
-    prof = np.median(grid, axis=0)          # median: a gap on a few lines can't kill it
+
+    # Which of those samples actually landed on the photograph. On a close-up
+    # the margin runs out of frame partway down the page, and counting those
+    # off-image samples as "no margin here" pushed the continuity score below
+    # its threshold -- so a margin that is plainly visible was rejected and the
+    # guide was then drawn at an arbitrary u.
+    II, UU = np.meshgrid(lines, us, indexing="ij")
+    gx, gy = sheet.xy(II.ravel(), UU.ravel())
+    H_, W_ = red.shape[:2]
+    inside = ((gx >= 0) & (gx < W_) & (gy >= 0) & (gy < H_)).reshape(II.shape)
+
+    prof = np.median(np.where(inside, grid, np.nan), axis=0)
+    prof = np.nan_to_num(prof, nan=0.0)
     prof = prof - np.median(prof)
     if prof.std() < 1e-6:
         return None
@@ -371,11 +383,21 @@ def find_margin_u(sheet, red, search=(-8.0, 0.45), step=0.02):
     # Continuity: a real margin shows up on most lines, a smudge does not.
     # Measured against each line's own background rather than a global
     # threshold, which would be set by unrelated bright regions of the page.
-    bg = np.median(grid, axis=1, keepdims=True)
+    bg = np.nanmedian(np.where(inside, grid, np.nan), axis=1, keepdims=True)
+    bg = np.nan_to_num(bg, nan=0.0)
     best, best_score = None, 0.0
     for k, x in enumerate(pk):
-        frac = float(((grid[:, x] - bg[:, 0]) > 0.4 * prof[x]).mean())
-        score = props["prominences"][k] * frac
+        ok = inside[:, x]
+        # A candidate seen on only a sliver of the page is not the margin. On a
+        # close-up the strongest red peak sat in the shadow at the page edge
+        # with 10% of its samples on the photo, 73px from the real margin --
+        # picking it would draw a confident red line in the wrong place, which
+        # is worse than reporting that the margin was not found.
+        if ok.sum() < 4 or ok.mean() < 0.40:
+            continue
+        # scored only over the lines where this u is actually on the photo
+        frac = float(((grid[ok, x] - bg[ok, 0]) > 0.4 * prof[x]).mean())
+        score = props["prominences"][k] * frac * ok.mean()
         if frac > 0.55 and score > best_score:
             best, best_score = us[x], score
     return None if best is None else float(best)
