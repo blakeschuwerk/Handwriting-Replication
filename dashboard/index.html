@@ -515,6 +515,7 @@
         <button class="minibtn" id="p_topPlus" title="add a line above">top +</button>
         <button class="minibtn" id="p_botMinus" title="drop the bottom line">bottom −</button>
         <button class="minibtn" id="p_botPlus" title="add a line below">bottom +</button>
+        <button class="minibtn" id="p_free" title="Place the four corners by hand, for a page whose margin is not square to the rules">free shape</button>
         <button class="minibtn" id="p_resnap" title="re-solve against the ink">↻ snap to lines</button>
         <button class="minibtn" id="p_redetect" title="start detection over">reset</button>
       </div>
@@ -564,7 +565,7 @@
         <kbd>⌫</kbd> delete ·
         <kbd>U</kbd> return to flow ·
         <kbd>arrows</kbd> nudge (<kbd>shift</kbd> = further, <kbd>⌘↑↓</kbd> = change line) ·
-        <kbd>⌘A</kbd> all · <kbd>esc</kbd> deselect
+        <kbd>⌘A</kbd> all · <kbd>esc</kbd> deselect &middot; <kbd>⌘Z</kbd> undo &middot; <kbd>⌘⇧Z</kbd> redo
       </div>
       <pre class="log" id="paperLog" style="display:none"></pre>
       <div class="bigshot" id="paperShot"></div>
@@ -1480,6 +1481,22 @@ setInterval(() => { if (!document.hidden) refreshStatus(); }, 6000);
 // ---- 6 · write on paper ----------------------------------------------------
 let paperGeom = null;      // last response from detect/adjust
 let dragCorner = null;     // index of the corner being dragged, or 'margin'
+let freeShape = false;
+
+// Free shape exists because a page-space rectangle cannot follow a printed
+// margin. Its left and right edges are constant-u lines, which under the
+// homography both pass through the u vanishing point, and the u shear is a
+// free gauge -- so when the margin search fails the guide has the wrong
+// *direction* and no amount of sliding will land it on the paper. Four corners
+// placed by hand have no such constraint.
+function setFreeShape(on) {
+  freeShape = on;
+  const b = $('#p_free');
+  if (b) { b.classList.toggle('on', on); b.textContent = on ? 'free shape: on' : 'free shape'; }
+  detInfo(on ? 'free shape — drag each corner onto your margins, then press snap to lines'
+             : 'free shape off — the writing area is a rectangle on the page again');
+  adjust(on ? { crop: paperGeom && paperGeom.quad } : { crop: null });
+}
 
 // A writing area can legitimately extend past the edge of the photo, but a
 // handle drawn out there cannot be clicked. Keep it just inside instead.
@@ -1615,6 +1632,15 @@ function drawRules() {
 
   if (typeof drawWordChrome === 'function') drawWordChrome(ctx, k);
   if (WE.mode === 'words') return;   // no sheet handles while editing words
+  if (paperGeom.crop) {
+    ctx.strokeStyle = 'rgba(240,160,60,.95)'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    paperGeom.crop.forEach((p, n) => {
+      const x = p[0] * k, y = p[1] * k;
+      n ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.closePath(); ctx.stroke();
+  }
   (paperGeom.quad || []).forEach((c, i) => {
     const p = handleAt(c, k, cv);
     ctx.beginPath(); ctx.arc(p.x, p.y, dragCorner === i ? 9 : 7, 0, 7);
@@ -1680,6 +1706,10 @@ $('#p_ov').addEventListener('pointerup', async (e) => {
   if (which === 'margin') {
     const m = paperGeom.margin[Math.floor(paperGeom.margin.length / 2)];
     await adjust({ margin_x: m[0] });
+  } else if (freeShape) {
+    // Nothing is re-derived from a page-space rectangle here: the four points
+    // are sent as they were placed, and the writing area becomes that shape.
+    await adjust({ crop: paperGeom.quad });
   } else {
     await adjust({ quad: paperGeom.quad, corner: which });
   }
@@ -1943,6 +1973,13 @@ document.addEventListener('keydown', async (e) => {
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
   const step = e.shiftKey ? 12 : 3;
   if (e.key === 'Escape') { WE.sel.clear(); selInfo(); drawRules(); scheduleWords(); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
+    e.preventDefault();
+    const r = await docPost('/api/doc/history', { dir: e.shiftKey ? 'redo' : 'undo' });
+    detInfo(r && r.error ? r.error : (e.shiftKey ? 'redone' : 'undone'));
+    WE.sel.clear(); selInfo(); drawRules();
+    return;
+  }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
     e.preventDefault();
     WE.doc.words.forEach(w => { if (!w.overflow) WE.sel.add(w.id); });
@@ -2073,6 +2110,7 @@ $('#p_clear').onclick = async () => {
   await docPost('/api/doc/text', { text: '' });
   detInfo('page cleared');
 };
+if ($('#p_free')) $('#p_free').onclick = () => setFreeShape(!freeShape);
 $('#p_seedNew').onclick = () => { $('#p_seed').value = Math.floor(Math.random() * 100000); };
 $('#p_paper').onchange = showPaper;
 $('#p_showlines').onchange = drawRules;

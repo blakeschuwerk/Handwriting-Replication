@@ -80,7 +80,7 @@ class Sheet:
     """Image <-> page mapping for one photographed sheet."""
 
     def __init__(self, M, c1, c2, u_left, u_right, i_first, n_lines,
-                 size, spacing_hint=0.0, margin_x=None):
+                 size, spacing_hint=0.0, margin_x=None, crop=None):
         self.M = np.asarray(M, float).reshape(3, 3)   # normalised image -> page
         self.Minv = np.linalg.inv(self.M)
         self.c1, self.c2 = float(c1), float(c2)
@@ -90,6 +90,15 @@ class Sheet:
         self.spacing_hint = float(spacing_hint)
         self.margin_x = None if margin_x is None else float(margin_x)
         self.norm = Norm(*self.size)
+        # Four image-space corners, TL TR BR BL, placed by hand. The writing
+        # area is normally a rectangle in page space, which under the homography
+        # forces its left and right edges through one vanishing point. A printed
+        # margin only lands on such an edge when the u axis happens to share its
+        # direction, and the u shear is a free gauge choice -- so when the
+        # margin search fails there is no value of u_left that will ever put the
+        # guide on the printed line. It has the wrong direction, not the wrong
+        # offset. A hand-placed quad sidesteps the gauge entirely.
+        self.crop = None if crop is None else [[float(a), float(b)] for a, b in crop]
 
     # -- bow ---------------------------------------------------------------
 
@@ -154,15 +163,48 @@ class Sheet:
     def polyline(self, i, n=24):
         return self.polyline_at(i, n)
 
+    def crop_uv(self):
+        """The hand-placed corners in page space, TL TR BR BL.
+
+        A homography maps straight lines to straight lines, so an edge drawn
+        straight on the photo is straight in page space too, give or take the
+        bow -- which is small over one page.
+        """
+        if self.crop is None:
+            return None
+        out = []
+        for x, y in self.crop:
+            u, v = self.uv(float(x), float(y))
+            out.append((float(u[0]), float(v[0])))
+        return out
+
+    def u_range(self, i):
+        """Where line ``i`` may hold text: the rule clipped to the writing area."""
+        q = self.crop_uv()
+        if q is None:
+            return self.u_left, self.u_right
+
+        def cross(a, b, v):
+            (u0, v0), (u1, v1) = a, b
+            if abs(v1 - v0) < 1e-9:
+                return u0
+            t = (v - v0) / (v1 - v0)
+            return u0 + (u1 - u0) * max(0.0, min(1.0, t))
+
+        lo = cross(q[0], q[3], float(i))      # TL -> BL
+        hi = cross(q[1], q[2], float(i))      # TR -> BR
+        return (lo, hi) if hi > lo else (hi, lo)
+
     def polyline_at(self, i, n=24):
-        u = np.linspace(self.u_left, self.u_right, n)
+        lo, hi = self.u_range(i)
+        u = np.linspace(lo, hi, n)
         x, y = self.xy(np.full(n, float(i)), u)
         return np.stack([x, y], 1)
 
     def line_bounds(self, i):
         """Pixel endpoints of one rule across the writing area."""
-        x, y = self.xy(np.array([float(i), float(i)]),
-                       np.array([self.u_left, self.u_right]))
+        lo, hi = self.u_range(i)
+        x, y = self.xy(np.array([float(i), float(i)]), np.array([lo, hi]))
         return (float(x[0]), float(y[0])), (float(x[1]), float(y[1]))
 
     def shift_u(self, d):
@@ -196,13 +238,14 @@ class Sheet:
             "size": list(self.size),
             "spacing_hint": self.spacing_hint,
             "margin_x": self.margin_x,
+            "crop": self.crop,
         }
 
     @staticmethod
     def from_json(d):
         return Sheet(d["M"], d["bow"][0], d["bow"][1], d["u_left"], d["u_right"],
                      d["i_first"], d["n_lines"], d["size"],
-                     d.get("spacing_hint", 0.0), d.get("margin_x"))
+                     d.get("spacing_hint", 0.0), d.get("margin_x"), d.get("crop"))
 
     def __repr__(self):
         return (f"Sheet(lines={self.n_lines} from {self.i_first}, "

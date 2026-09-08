@@ -697,25 +697,33 @@ def sheet_json(sheet, response=None, n_points=24, obs=None):
         lines.append({"i": int(i),
                       "pts": [[round(float(x), 1), round(float(y), 1)] for x, y in pts]})
 
-    def guide(u):
+    def guide(side):
+        """Left or right edge of the writing area, sampled down the page."""
         ii = np.linspace(sheet.i_first, sheet.i_first + sheet.n_lines - 1, n_points)
-        x, y = sheet.xy(ii, np.full(n_points, float(u)))
+        us = np.array([sheet.u_range(float(i))[side] for i in ii])
+        x, y = sheet.xy(ii, us)
         return [[round(float(a), 1), round(float(b), 1)] for a, b in zip(x, y)]
 
     i0, i1 = sheet.i_first, sheet.i_first + sheet.n_lines - 1
-    corners = [sheet.point(i0, sheet.u_left), sheet.point(i0, sheet.u_right),
-               sheet.point(i1, sheet.u_right), sheet.point(i1, sheet.u_left)]
+    if sheet.crop:
+        corners = [(float(x), float(y)) for x, y in sheet.crop]
+    else:
+        lo0, hi0 = sheet.u_range(i0)
+        lo1, hi1 = sheet.u_range(i1)
+        corners = [sheet.point(i0, lo0), sheet.point(i0, hi0),
+                   sheet.point(i1, hi1), sheet.point(i1, lo1)]
     out = {
         "sheet": sheet.to_json(),
         "lines": lines,
-        "margin": guide(0.0),
-        "right": guide(sheet.u_right),
+        "margin": guide(0),
+        "right": guide(1),
         "quad": [[round(x, 1), round(y, 1)] for x, y in corners],
         "count": sheet.n_lines,
         # The margin guide is only a measurement when this is true. Drawing a
         # confident red line at an arbitrary u when the search failed is how it
         # ended up 58px from the real margin with nothing saying so.
         "margin_found": sheet.margin_x is not None,
+        "crop": sheet.crop,
         "i_first": sheet.i_first,
         "spacing": round(sheet.spacing_px(i0 + sheet.n_lines // 2,
                                           (sheet.u_left + sheet.u_right) / 2), 1),

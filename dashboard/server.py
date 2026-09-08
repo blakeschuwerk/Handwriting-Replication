@@ -1043,8 +1043,21 @@ async def paper_adjust(payload: dict):
     sh = _sheetmod.Sheet.from_json(payload["sheet"]) if payload.get("sheet") else st["sheet"]
     sh = _sheetmod.Sheet.from_json(sh.to_json())      # work on a copy
 
+    # Free shape: the four corners are kept exactly where they were put, and
+    # the writing area becomes that quadrilateral rather than a page-space
+    # rectangle. Nothing is re-derived, so a hand-placed margin stays where it
+    # was placed instead of snapping back onto a constant-u line.
+    if "crop" in payload:
+        c = payload.get("crop")
+        sh.crop = [[float(x), float(y)] for x, y in c] if c else None
+        if sh.crop:
+            vs = [float(sh.uv(x, y)[1][0]) for x, y in sh.crop]
+            i0, i1 = int(round(min(vs))), int(round(max(vs)))
+            if i1 > i0:
+                sh.i_first, sh.n_lines = i0, i1 - i0 + 1
+
     quad = payload.get("quad")
-    if quad and len(quad) == 4:
+    if quad and len(quad) == 4 and sh.crop is None:
         us, vs = [], []
         for x, y in quad:
             u, v = sh.uv(float(x), float(y))
@@ -1095,9 +1108,21 @@ async def paper_adjust(payload: dict):
     sh.n_lines = max(1, sh.n_lines)
 
     if payload.get("resnap"):
-        keep = (sh.u_left, sh.u_right, sh.i_first, sh.n_lines, sh.margin_x)
-        sh, _info = _sheetmod.refit(sh, st["obs"])
-        sh.u_left, sh.u_right, sh.i_first, sh.n_lines, sh.margin_x = keep
+        keep = (sh.u_left, sh.u_right, sh.i_first, sh.n_lines, sh.margin_x, sh.crop)
+        obs = st["obs"]
+        if sh.crop:
+            # Refit against the rules the user pointed at, not the whole photo.
+            # This is what makes the free shape useful beyond drawing: it tells
+            # the detector which ink is the page.
+            import cv2 as _cv2, numpy as _np
+            poly = _np.array(sh.crop, _np.float32)
+            keep_rows = [k for k in range(len(obs))
+                         if _cv2.pointPolygonTest(
+                             poly, (float(obs[k][0]), float(obs[k][1])), False) >= 0]
+            if len(keep_rows) >= 30:
+                obs = obs[keep_rows]
+        sh, _info = _sheetmod.refit(sh, obs)
+        sh.u_left, sh.u_right, sh.i_first, sh.n_lines, sh.margin_x, sh.crop = keep
 
     st["sheet"] = sh
     return _paper.sheet_json(sh, st["flat"], obs=st.get("obs"))
@@ -1108,6 +1133,21 @@ async def paper_adjust(payload: dict):
 # placed in photo pixels and sends back pixel positions; it never reimplements
 # the sheet maths, so there is only one definition of where a word goes.
 import doc as _doc          # noqa: E402
+
+# Undo lives here rather than in the browser because the document does. The box
+# editor's pattern is the same -- whole-state snapshots, capped depth -- just
+# kept on the side that owns the state, so a reload cannot desynchronise it.
+_UNDO: dict = {}
+_REDO: dict = {}
+_UNDO_MAX = 60
+
+
+def _snapshot(name, document):
+    _UNDO.setdefault(name, []).append(json.dumps(document))
+    if len(_UNDO[name]) > _UNDO_MAX:
+        _UNDO[name].pop(0)
+    _REDO[name] = []
+
 
 DOCS = OUTPUT / "paper" / "docs"
 WORDS = OUTPUT / "paper" / "words"
@@ -1227,6 +1267,30 @@ async def doc_text(payload: dict):
     return doc_view(document, st["sheet"])
 
 
+@app.post("/api/doc/history")
+async def doc_history(payload: dict):
+    """Step the document back or forward one edit."""
+    name = payload.get("name")
+    if not name:
+        return {"error": "no paper named"}
+    try:
+        st = _paper_state(name)
+    except Exception as exc:
+        return {"error": str(exc)[:400]}
+    sheet = st["sheet"]
+    document = _load_doc(name, sheet)
+
+    back = payload.get("dir", "undo") == "undo"
+    src, dst = (_UNDO, _REDO) if back else (_REDO, _UNDO)
+    stack = src.get(name) or []
+    if not stack:
+        return {"error": "nothing to " + ("undo" if back else "redo"), **doc_view(document, sheet)}
+    dst.setdefault(name, []).append(json.dumps(document))
+    document = json.loads(stack.pop())
+    _doc.save(str(_doc_path(name)), document)
+    return doc_view(document, sheet)
+
+
 @app.post("/api/doc/edit")
 async def doc_edit(payload: dict):
     name = payload.get("name")
@@ -1242,6 +1306,7 @@ async def doc_edit(payload: dict):
     # Dragging moves what you grabbed and nothing else; only operations that
     # change the text reflow the page, the way a word processor does.
     reflow_ops = {"unpin", "delete", "retext", "opts", "indent", "linebreak"}
+    _snapshot(name, document)
 
     if op == "pin":
         u, v = sheet.uv(float(payload["x"]), float(payload["y"]))

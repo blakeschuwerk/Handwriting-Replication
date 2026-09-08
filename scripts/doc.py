@@ -300,15 +300,21 @@ def baseline_drift(doc, line, u, amp):
 # Reflow
 # ---------------------------------------------------------------------------
 
-def _free_intervals(sheet, blocked):
-    """[u_left, u_right] minus the pinned words sitting on this line."""
-    out, cur = [], sheet.u_left
+def _free_intervals(sheet, blocked, line=None):
+    """This line's usable span minus the pinned words sitting on it.
+
+    Asks the sheet per line rather than using one global pair, because a
+    hand-placed writing area is a quadrilateral: on a trapezoid every rule
+    starts and ends somewhere different.
+    """
+    u0, u1 = sheet.u_range(line) if line is not None else (sheet.u_left, sheet.u_right)
+    out, cur = [], u0
     for a, b in sorted(blocked):
         if a > cur:
-            out.append((cur, min(a, sheet.u_right)))
+            out.append((cur, min(a, u1)))
         cur = max(cur, b)
-    if cur < sheet.u_right:
-        out.append((cur, sheet.u_right))
+    if cur < u1:
+        out.append((cur, u1))
     return [(a, b) for a, b in out if b - a > 1e-6]
 
 
@@ -345,18 +351,18 @@ def reflow(doc, sheet, opts=None):
             (p["u"] - space * 0.5, p["u"] + word_width(w, o) + space * 0.5))
 
     li = first_line
-    spans = _free_intervals(sheet, blocked.get(li, []))
+    spans = _free_intervals(sheet, blocked.get(li, []), li)
     si = 0
-    u = spans[0][0] if spans else sheet.u_left
+    u = spans[0][0] if spans else sheet.u_range(li)[0]
     first = True
     overflow, clipped = [], []
 
     def next_line(n=1):
         nonlocal li, spans, si, u
         li += n
-        spans = _free_intervals(sheet, blocked.get(li, []))
+        spans = _free_intervals(sheet, blocked.get(li, []), li)
         si = 0
-        u = spans[0][0] if spans else sheet.u_left
+        u = spans[0][0] if spans else sheet.u_range(li)[0]
 
     for w in words:
         if w.get("pin"):
@@ -395,7 +401,7 @@ def reflow(doc, sheet, opts=None):
             first = False
             continue
 
-        lo, hi = spans[si] if si < len(spans) else (sheet.u_left, sheet.u_right)
+        lo, hi = spans[si] if si < len(spans) else sheet.u_range(li)
         if width > hi - lo:
             w["clipped"] = True
             clipped.append(w["id"])
