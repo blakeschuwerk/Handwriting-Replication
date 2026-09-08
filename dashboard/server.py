@@ -1218,6 +1218,37 @@ def doc_view(document, sheet):
             "overflow": sum(1 for w in words if w["overflow"])}
 
 
+def _harden_visible_breaks(document, ids):
+    """Turn the wrapped line breaks inside a selection into recorded ones.
+
+    A visible line break comes either from a stored newline or from reflow
+    simply running out of room, and only the first kind is data. So inserting a
+    break in front of a selection that straddles a wrap let every word in it
+    flow onto one fresh, empty, full-width line -- Blake's "five words and five
+    words get mashed into a single line". Nothing was clobbered; the separator
+    he could see had never existed as anything.
+
+    Recording the breaks that are actually on screen, for the span being
+    edited, makes what he sees and what the document holds the same thing.
+    Deliberately scoped to the selection: hardening every wrap on the page
+    would stop the text re-wrapping when the size or the writing area changes.
+    """
+    ws = sorted(document["words"], key=lambda d: d["ord"])
+    chosen = {w["ord"] for w in ws if w["id"] in set(ids)}
+    if not chosen:
+        return
+    lo, hi = min(chosen), max(chosen)
+    prev = None
+    for w in ws:
+        p = w.get("placed")
+        cur = int(p["line"]) if p and p.get("line") is not None else None
+        if (cur is not None and prev is not None and cur != prev
+                and lo <= w["ord"] <= hi and not int(w.get("nl", 0) or 0)):
+            w["nl"] = 1
+        if cur is not None:
+            prev = cur
+
+
 def _rebuild_text(document):
     """Reconstruct the source text from the words, including their structure."""
     out = []
@@ -1227,7 +1258,10 @@ def _rebuild_text(document):
         elif w.get("nl"):
             out.append("\n" * int(w["nl"]) + "\t" * int(w.get("tabs", 0)))
         else:
-            out.append(" ")
+            # A tab on a word that does not start a line is still an indent.
+            # Emitting a bare space here dropped it, and the next "Write it"
+            # re-parsed the text over the records and made the loss permanent.
+            out.append(" " + "\t" * int(w.get("tabs", 0)))
         out.append(w["text"])
     return "".join(out)
 
@@ -1342,12 +1376,25 @@ async def doc_edit(payload: dict):
         _doc.reroll(document, ids)
         regen = True
     elif op == "delete":
+        _harden_visible_breaks(document, ids)
         wanted = set(ids)
+        # Carry a removed word's line break onto the next survivor. Deleting the
+        # word that happened to begin a line used to take the break with it and
+        # merge that line into the one above.
+        ws = sorted(document["words"], key=lambda d: d["ord"])
+        carried = 0
+        for w in ws:
+            if w["id"] in wanted:
+                carried += int(w.get("nl", 0) or 0)
+            elif carried:
+                w["nl"] = int(w.get("nl", 0) or 0) + carried
+                carried = 0
         document["words"] = [w for w in document["words"] if w["id"] not in wanted]
         for k, w in enumerate(sorted(document["words"], key=lambda d: d["ord"])):
             w["ord"] = k
         document["text"] = _rebuild_text(document)
     elif op in ("indent", "linebreak"):
+        _harden_visible_breaks(document, ids)
         # Applied to the first word of the selection: that word and everything
         # after it move, which is what pressing Tab or Enter in front of a
         # selection does in a word processor.

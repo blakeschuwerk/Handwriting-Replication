@@ -30,6 +30,7 @@ actually do.
 
 import hashlib
 import json
+import re
 import math
 import os
 import uuid
@@ -97,19 +98,25 @@ def new_word(text, ord_, nl=0, tabs=0):
 # ---------------------------------------------------------------------------
 
 def parse_text(text):
-    """Text -> [(word, newlines_before, tabs_before)], preserving structure."""
-    out, pending_nl = [], 0
+    """Text -> [(word, newlines_before, tabs_before)], preserving structure.
+
+    Tabs are counted wherever they appear, not only at the head of a line. An
+    indent on a word in the middle of a line is real structure, and reading
+    only the leading tabs is half of why one vanished on the round trip
+    through the textarea -- the other half being that it was never written out.
+    """
+    out, pending_nl, pending_tabs = [], 0, 0
     for raw in text.split("\n"):
-        stripped = raw.lstrip("\t")
-        tabs = len(raw) - len(stripped)
-        toks = stripped.split()
-        if not toks:
+        if not raw.strip():
             pending_nl += 1
             continue
-        for k, w in enumerate(toks):
-            out.append((w, pending_nl if k == 0 else 0, tabs if k == 0 else 0))
-            pending_nl = 1
-        pending_nl = 1
+        for tok in re.findall(r"[^\s]+|[ \t]+", raw):
+            if not tok.strip():
+                pending_tabs += tok.count("\t")
+                continue
+            out.append((tok, pending_nl, pending_tabs))
+            pending_nl, pending_tabs = 0, 0
+        pending_nl, pending_tabs = 1, 0
     return out
 
 
@@ -432,10 +439,23 @@ def pin(doc, ids, line, u, sheet=None, opts=None):
     if not sel:
         return 0
     group = new_id() if len(sel) > 1 else None
+    # Keep the selection's shape. This used to lay every selected word out on
+    # one line, so dragging a selection that spanned two lines silently
+    # flattened it into one -- the same collapse as the keyboard ops, by a
+    # different route. Words carry their own line and offset relative to the
+    # one being dragged; only a word with no placement falls back to packing.
+    base = sel[0].get("placed") or {}
+    base_line, base_u = base.get("line"), base.get("u")
     cur = float(u)
     for w in sel:
-        w["pin"] = {"line": int(line), "u": cur, "group": group}
-        cur += word_width(w, o) + o["space_em"] * o["scale"]
+        p = w.get("placed") or {}
+        if base_line is not None and p.get("line") is not None:
+            dl = int(p["line"]) - int(base_line)
+            du = float(p.get("u", base_u)) - float(base_u)
+            w["pin"] = {"line": int(line) + dl, "u": float(u) + du, "group": group}
+        else:
+            w["pin"] = {"line": int(line), "u": cur, "group": group}
+            cur += word_width(w, o) + o["space_em"] * o["scale"]
     return len(sel)
 
 
