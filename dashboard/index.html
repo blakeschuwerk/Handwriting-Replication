@@ -1740,7 +1740,7 @@ $('#p_ov').addEventListener('pointerup', async (e) => {
 // ---- word editor -----------------------------------------------------------
 // Canvas, not DOM nodes. The box editor rebuilds every element on each mouse
 // move; at a few hundred words over a 4032px photo that is unusable.
-const WE = { doc: null, sel: new Set(), sprites: new Map(), mode: 'lines',
+const WE = { doc: null, sel: new Set(), sprites: new Map(), mode: 'lines', marq: null,
              drag: null, range: false, anchor: null, dirty: false };
 
 function wordsOn() { return WE.mode === 'words'; }
@@ -1873,6 +1873,14 @@ const lerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
 // multiplied into the paper
 function drawWordChrome(ctx, k) {
   if (!WE.doc || !Array.isArray(WE.doc.words) || !wordsOn()) return;
+  if (WE.marq && WE.marq.moved) {
+    const m = WE.marq;
+    const x = Math.min(m.x0, m.x1) * k, y = Math.min(m.y0, m.y1) * k;
+    const w = Math.abs(m.x1 - m.x0) * k, h = Math.abs(m.y1 - m.y0) * k;
+    ctx.fillStyle = 'rgba(124,131,253,.16)'; ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = 'rgba(124,131,253,.95)'; ctx.lineWidth = 1;
+    ctx.strokeRect(x + .5, y + .5, w, h);
+  }
   const off = WE.drag;
   for (const w of WE.doc.words) {
     if (w.x === undefined) continue;
@@ -1909,10 +1917,9 @@ function hitWord(px, py) {
   return null;
 }
 
-// Where in the text does this point sit? Used so a drag selects a *range* of
-// words in reading order rather than only the ones the cursor physically
-// crossed -- dragging across two lines in any editor selects the end of the
-// first line and the start of the second, not a rectangle.
+// Where in the text does this point sit? Still used by shift-click, which
+// selects a reading-order range the way a text editor does. Plain dragging no
+// longer uses it -- see the marquee below.
 function docIndexAt(px, py) {
   const ws = WE.doc.words.filter(w => w.x !== undefined && !w.overflow);
   if (!ws.length) return null;
@@ -1948,14 +1955,23 @@ $('#p_ov').addEventListener('pointerdown', (e) => {
   } else if (hit && (e.metaKey || e.ctrlKey)) {
     WE.sel.has(hit.id) ? WE.sel.delete(hit.id) : WE.sel.add(hit.id);
     WE.anchor = idx;
-  } else if (hit && WE.sel.has(hit.id)) {
-    // pressing inside an existing selection starts a move, as in a word
-    // processor -- selecting is what you do to text you have not selected yet
+  } else if (hit) {
+    // Pressing a word moves it, as in any design tool. If it was not already
+    // selected it becomes the selection first, so a single press-and-drag
+    // moves the word under the cursor rather than starting a selection.
+    if (!WE.sel.has(hit.id)) { WE.sel.clear(); WE.sel.add(hit.id); }
+    WE.anchor = idx;
     WE.drag = { dx: 0, dy: 0, x0: px, y0: py, moved: false };
   } else {
-    WE.anchor = idx;
-    if (idx != null) selectRange(idx, idx); else WE.sel.clear();
-    WE.range = true;
+    // Empty paper: rubber band. Words are accumulated as the box passes over
+    // them and are never taken back out during the same drag -- Blake asked
+    // for "any word that is touched gets included", and the old behaviour of
+    // dropping a word when the cursor crossed it a second time was the single
+    // most tedious thing about selecting a line.
+    WE.anchor = null;
+    WE.marq = { x0: px, y0: py, x1: px, y1: py, moved: false,
+                base: (e.shiftKey || e.metaKey || e.ctrlKey) ? new Set(WE.sel) : new Set() };
+    WE.sel = new Set(WE.marq.base);
   }
   cv.setPointerCapture(e.pointerId);
   selInfo(); drawRules(); scheduleWords();
@@ -1970,9 +1986,18 @@ $('#p_ov').addEventListener('pointermove', (e) => {
     WE.drag.dx = px - WE.drag.x0; WE.drag.dy = py - WE.drag.y0;
     if (Math.abs(WE.drag.dx) + Math.abs(WE.drag.dy) > 2) WE.drag.moved = true;
     scheduleWords(); drawRules();
-  } else if (WE.range && WE.anchor != null) {
-    const idx = docIndexAt(px, py);
-    if (idx != null) { selectRange(WE.anchor, idx); selInfo(); drawRules(); }
+  } else if (WE.marq) {
+    WE.marq.x1 = px; WE.marq.y1 = py;
+    if (Math.abs(px - WE.marq.x0) + Math.abs(py - WE.marq.y0) > 2) WE.marq.moved = true;
+    const lo = [Math.min(WE.marq.x0, px), Math.min(WE.marq.y0, py)];
+    const hi = [Math.max(WE.marq.x0, px), Math.max(WE.marq.y0, py)];
+    for (const w of WE.doc.words) {
+      if (w.x === undefined || w.overflow) continue;
+      const overlaps = w.x <= hi[0] && w.x + w.w >= lo[0]
+                    && w.y <= hi[1] && w.y + w.h >= lo[1];
+      if (overlaps) WE.sel.add(w.id);       // union: touched once, stays in
+    }
+    selInfo(); drawRules();
   }
 });
 
@@ -1980,7 +2005,14 @@ $('#p_ov').addEventListener('pointerup', async (e) => {
   if (!wordsOn()) return;
   const cv = $('#p_ov');
   try { cv.releasePointerCapture(e.pointerId); } catch (_) {}
-  if (WE.range) { WE.range = false; drawRules(); return; }
+  if (WE.marq) {
+    const wasClick = !WE.marq.moved;
+    WE.marq = null;
+    // A click on empty paper with nothing dragged clears the selection, which
+    // is the only way to deselect -- as in every other app.
+    if (wasClick) { WE.sel.clear(); selInfo(); }
+    drawRules(); return;
+  }
   if (!WE.drag) return;
   const d = WE.drag; WE.drag = null;
   if (!d.moved || !WE.sel.size) { drawRules(); scheduleWords(); return; }
