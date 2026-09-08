@@ -178,8 +178,50 @@ class Sheet:
             out.append((float(u[0]), float(v[0])))
         return out
 
+    def lines_in_crop(self):
+        """Which whole ruled lines fit inside a hand-placed writing area.
+
+        Blake's rule: a line is auto-included only if *all* of it is inside the
+        four corners. On a slanted quad the bottom-left corner routinely cuts a
+        rule that the bottom-right corner would still include, and half a line
+        is not somewhere you can write.
+
+        Both ends of the line have to land on the quad's own left and right
+        edges, which for a convex quad is enough to put the whole span inside.
+        Returns (i_first, n_lines), or None if there is no crop or nothing fits.
+        Lines added by hand with top/bottom +- deliberately live outside this.
+        """
+        q = self.crop_uv()
+        if q is None:
+            return None
+        (_, v_tl), (_, v_tr), (_, v_br), (_, v_bl) = q
+
+        def whole_line_inside(i):
+            for a, b in ((v_tl, v_bl), (v_tr, v_br)):   # left edge, right edge
+                if abs(b - a) < 1e-9:
+                    if abs(i - a) > 1e-9:
+                        return False
+                    continue
+                t = (i - a) / (b - a)
+                if t < -1e-9 or t > 1.0 + 1e-9:
+                    return False
+            return True
+
+        vs = (v_tl, v_tr, v_br, v_bl)
+        lo, hi = int(np.floor(min(vs))) - 1, int(np.ceil(max(vs))) + 1
+        ok = [i for i in range(lo, hi + 1) if whole_line_inside(i)]
+        if not ok:
+            return None
+        return ok[0], len(ok)
+
     def u_range(self, i):
-        """Where line ``i`` may hold text: the rule clipped to the writing area."""
+        """Where line ``i`` may hold text: the rule clipped to the writing area.
+
+        The interpolation is clamped rather than culled, deliberately: lines
+        added past the quad with top/bottom +- still have to be drawable and
+        writable, and clamping gives them the sensible full width of the
+        nearest edge. Which lines *exist* is decided by lines_in_crop().
+        """
         q = self.crop_uv()
         if q is None:
             return self.u_left, self.u_right

@@ -1051,10 +1051,14 @@ async def paper_adjust(payload: dict):
         c = payload.get("crop")
         sh.crop = [[float(x), float(y)] for x, y in c] if c else None
         if sh.crop:
-            vs = [float(sh.uv(x, y)[1][0]) for x, y in sh.crop]
-            i0, i1 = int(round(min(vs))), int(round(max(vs)))
-            if i1 > i0:
-                sh.i_first, sh.n_lines = i0, i1 - i0 + 1
+            # Only lines that fit inside the shape in their entirety. This used
+            # to round the crop's v range outward by up to half a line each end,
+            # which is why rules appeared above the top corners and below the
+            # bottom ones. Moving any corner re-derives from scratch, so the
+            # corners stay the one source of truth for which lines exist.
+            got = sh.lines_in_crop()
+            if got:
+                sh.i_first, sh.n_lines = got
 
     quad = payload.get("quad")
     if quad and len(quad) == 4 and sh.crop is None:
@@ -1123,6 +1127,14 @@ async def paper_adjust(payload: dict):
                 obs = obs[keep_rows]
         sh, _info = _sheetmod.refit(sh, obs)
         sh.u_left, sh.u_right, sh.i_first, sh.n_lines, sh.margin_x, sh.crop = keep
+        # refit moves M, and the crop is stored in image space, so the corners
+        # now map to different page-space rows. Restoring the old line range
+        # unchanged left the grid describing a v field that no longer existed --
+        # the rules drifted off the quad. Re-derive against the new fit.
+        if sh.crop:
+            got = sh.lines_in_crop()
+            if got:
+                sh.i_first, sh.n_lines = got
 
     st["sheet"] = sh
     return _paper.sheet_json(sh, st["flat"], obs=st.get("obs"))
