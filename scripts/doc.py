@@ -196,6 +196,89 @@ def humanize_params(h):
     }
 
 
+BASELINE_FRAC = 0.907   # where the baseline sits inside a rendered word box
+
+
+def word_quad(doc, sheet, w, o=None):
+    """The four image-space corners of a word: top-left, top-right, bottom-right,
+    bottom-left.
+
+    This is the single definition of where a word sits on the photo. The
+    compositor and the browser view both derive from it, so a preview and an
+    export cannot disagree about geometry.
+
+    It returns a quad rather than a point and an angle on purpose. A point and
+    an angle can only place a word by translating, rotating and uniformly
+    scaling it, which leaves the word flat while the page recedes behind it --
+    measured at ~19px of shape error on a typical word, two thirds of an
+    x-height, and three times that on a more steeply angled photo. Four corners
+    carry the foreshortening and shear as well.
+    """
+    p = w.get("placed")
+    if not p or w.get("overflow"):
+        return None
+    if o is None:
+        o = dict(DEFAULTS)
+        o.update(doc.get("opts") or {})
+    hp = humanize_params(o["humanize"])
+
+    line, u0 = p["line"], float(p["u"])
+    size = 1.0 + (word_unit(doc, w["id"], "size") * 2 - 1) * hp["size_sd"]
+    s = o["scale"] * float(w.get("scale", 1.0)) * size     # height, in line units
+    wu = (w.get("aspect") or 3.0) * s                      # width, in u units
+
+    # Drift and slant belong in page space. Applied in pixels after mapping they
+    # would mean different amounts in different places -- the page runs 72 to 98
+    # pixels per unit, so a fixed pixel drift is a third larger at one edge than
+    # the other. Slant is a shear rather than a rotation: handwriting leans while
+    # its baseline stays on the rule.
+    dv = baseline_drift(doc, line, u0 + wu / 2, hp["baseline"]) * s
+    slant = ((word_unit(doc, w["id"], "slant") * 2 - 1) * hp["slant_sd"]
+             + float(w.get("slant", 0.0)))
+    lean = math.tan(math.radians(slant)) * s   # how far the top edge leads the foot
+
+    v_top = line + dv - BASELINE_FRAC * s
+    v_bot = line + dv + (1.0 - BASELINE_FRAC) * s
+    corners = ((v_top, u0 + lean), (v_top, u0 + wu + lean),
+               (v_bot, u0 + wu), (v_bot, u0))
+    return [list(sheet.point(v, u)) for v, u in corners]
+
+
+def quad_ok(quad, img_w, img_h):
+    """Reject a quad that a broken ruling fit would produce.
+
+    A photo with no ruled paper in it still yields *a* sheet, and the quads that
+    come out of one are inverted, degenerate or enormous. Warping into those
+    writes garbage or allocates a huge buffer.
+
+    The tests are deliberately absolute rather than relative to the sheet. An
+    earlier version compared the quad's area against an expectation computed
+    from ``spacing_px`` on the same sheet that produced the quad, so both sides
+    scaled together and the ratio stayed near 1 however broken the fit was --
+    the check could never fire.
+    """
+    if quad is None:
+        return False
+    pts = [(float(x), float(y)) for x, y in quad]
+    if not all(math.isfinite(c) for p in pts for c in p):
+        return False
+
+    cross = []
+    signed = 0.0
+    for k in range(4):
+        ax, ay = pts[k]
+        bx, by = pts[(k + 1) % 4]
+        cx, cy = pts[(k + 2) % 4]
+        signed += ax * by - bx * ay
+        cross.append((bx - ax) * (cy - by) - (by - ay) * (cx - bx))
+    if min(cross) <= 0 < max(cross) or max(cross) <= 0:
+        return False                       # not convex, or wound inside out
+    signed /= 2.0
+    if signed <= 0:
+        return False                       # flipped: the foot sits above the head
+    return 4.0 <= signed <= 0.25 * img_w * img_h
+
+
 def baseline_drift(doc, line, u, amp):
     """Smooth drift along a line, as a function of position rather than of
     which words happen to be there.

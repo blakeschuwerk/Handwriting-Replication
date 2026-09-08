@@ -566,46 +566,56 @@ def compose_doc(bgr, sheet, document, scale=None, darkness=None):
     out = bgr.astype(np.float32)
     H, W = out.shape[:2]
     drawn = 0
+    skipped = 0
 
     for w in sorted(document["words"], key=lambda d: d["ord"]):
-        p = w.get("placed")
-        if not p or w.get("overflow") or not w.get("png"):
+        if not w.get("png"):
             continue
-        line, u = p["line"], p["u"]
+        quad = _doc.word_quad(document, sheet, w, o)
+        if quad is None:
+            continue
 
-        size = 1.0 + (_doc.word_unit(document, w["id"], "size") * 2 - 1) * hp["size_sd"]
-        h_px = sheet.spacing_px(line, u) * o["scale"] * w.get("scale", 1.0) * size
+        if not _doc.quad_ok(quad, W, H):
+            skipped += 1
+            continue
+
+        dst = np.asarray(quad, np.float32)
+        x0 = int(math.floor(dst[:, 0].min())); x1 = int(math.ceil(dst[:, 0].max())) + 1
+        y0 = int(math.floor(dst[:, 1].min())); y1 = int(math.ceil(dst[:, 1].max())) + 1
+        cx0, cy0 = max(0, x0), max(0, y0)
+        cx1, cy1 = min(W, x1), min(H, y1)
+        if cx1 <= cx0 or cy1 <= cy0:
+            continue
+
         alpha = ink_alpha(Image.open(w["png"]))
-        h = max(4, int(round(h_px)))
-        wd = max(2, int(round(alpha.width * h / alpha.height)))
-        a = np.asarray(alpha.resize((wd, h), Image.LANCZOS), np.float32) / 255.0
+        # Pre-scale to roughly the destination size first. warpPerspective only
+        # offers linear sampling, which aliases badly when it has to shrink a
+        # sprite several times over; LANCZOS down to the right size first keeps
+        # the faint strokes that carry the texture.
+        eh = max(np.hypot(*(dst[3] - dst[0])), np.hypot(*(dst[2] - dst[1])))
+        ew = max(np.hypot(*(dst[1] - dst[0])), np.hypot(*(dst[2] - dst[3])))
+        tw = max(2, min(alpha.width, int(round(ew))))
+        th = max(2, min(alpha.height, int(round(eh))))
+        a = np.asarray(alpha.resize((tw, th), Image.LANCZOS), np.float32) / 255.0
 
-        slant = (_doc.word_unit(document, w["id"], "slant") * 2 - 1) * hp["slant_sd"]
-        ang = sheet.tangent_deg(line, u + (w.get("aspect") or 3.0) * o["scale"] / 2) \
-            + slant + w.get("slant", 0.0)
-        if abs(ang) > 0.05:
-            d = math.radians(ang)
-            nw = int(abs(wd * math.cos(d)) + abs(h * math.sin(d))) + 2
-            nh = int(abs(wd * math.sin(d)) + abs(h * math.cos(d))) + 2
-            M = cv2.getRotationMatrix2D((wd / 2, h / 2), -ang, 1.0)
-            M[0, 2] += nw / 2 - wd / 2
-            M[1, 2] += nh / 2 - h / 2
-            a = cv2.warpAffine(a, M, (nw, nh), flags=cv2.INTER_LINEAR, borderValue=0.0)
-            wd, h = nw, nh
+        # warpPerspective samples at pixel centres, so the sprite's full extent
+        # runs from -0.5 to tw-0.5, not 0 to tw. Using 0..tw squeezes the image
+        # by one pixel across its width and height, which shows up as the right
+        # and bottom edges landing ~1.4px short while the top and left are exact.
+        src = np.array([[-0.5, -0.5], [tw - 0.5, -0.5],
+                        [tw - 0.5, th - 0.5], [-0.5, th - 0.5]], np.float32)
+        M = cv2.getPerspectiveTransform(src, dst - np.float32([cx0, cy0]))
+        a = cv2.warpPerspective(a, M, (cx1 - cx0, cy1 - cy0),
+                                flags=cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
 
-        bx, by = sheet.point(line, u)
-        by += _doc.baseline_drift(document, line, u, hp["baseline"]) * h_px
-        x0 = int(round(bx))
-        y0 = int(round(by - BASELINE_FRAC * h_px - (h - h_px) / 2))
-
-        sx0, sy0 = max(0, x0), max(0, y0)
-        sx1, sy1 = min(W, x0 + wd), min(H, y0 + h)
-        if sx1 <= sx0 or sy1 <= sy0:
-            continue
-        sub = a[sy0 - y0:sy1 - y0, sx0 - x0:sx1 - x0][..., None]
         dk = o["darkness"] ** max(0.05, w.get("dark", 1.0))
-        out[sy0:sy1, sx0:sx1] *= (1.0 - sub * (1.0 - dk))
+        out[cy0:cy1, cx0:cx1] *= (1.0 - a[..., None] * (1.0 - dk))
         drawn += 1
+
+    if skipped:
+        print(f"[paper] skipped {skipped} words with an implausible shape "
+              f"(the ruling fit is probably wrong)", flush=True)
 
     return np.clip(out, 0, 255).astype(np.uint8), drawn
 
