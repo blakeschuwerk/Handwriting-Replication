@@ -1124,7 +1124,6 @@ def doc_view(document, sheet):
     """The document as the browser needs it: words placed in photo pixels."""
     o = dict(_doc.DEFAULTS)
     o.update(document.get("opts") or {})
-    hp = _doc.humanize_params(o["humanize"])
     words = []
     for w in sorted(document["words"], key=lambda d: d["ord"]):
         p = w.get("placed")
@@ -1132,18 +1131,17 @@ def doc_view(document, sheet):
                 "overflow": bool(w.get("overflow")), "clipped": bool(w.get("clipped")),
                 "png": os.path.basename(w["png"]) if w.get("png") else None}
         if p and not w.get("overflow"):
-            size = 1.0 + (_doc.word_unit(document, w["id"], "size") * 2 - 1) * hp["size_sd"]
-            h = sheet.spacing_px(p["line"], p["u"]) * o["scale"] * w.get("scale", 1.0) * size
-            asp = w.get("aspect") or 3.0
-            bx, by = sheet.point(p["line"], p["u"])
-            by += _doc.baseline_drift(document, p["line"], p["u"], hp["baseline"]) * h
-            slant = (_doc.word_unit(document, w["id"], "slant") * 2 - 1) * hp["slant_sd"]
+            quad = _doc.word_quad(document, sheet, w, o)
+            xs = [c[0] for c in quad]; ys = [c[1] for c in quad]
             item.update({
                 "line": p["line"], "u": round(p["u"], 4),
-                "x": round(bx, 1), "y": round(by - 0.907 * h, 1),
-                "w": round(asp * h, 1), "h": round(h, 1),
-                "deg": round(sheet.tangent_deg(p["line"], p["u"] + asp * o["scale"] / 2)
-                             + slant + w.get("slant", 0.0), 3),
+                # The four corners the word actually maps to. The browser draws
+                # from these rather than deriving geometry of its own, so the
+                # preview and the export cannot disagree about where a word is.
+                "quad": [[round(c[0], 1), round(c[1], 1)] for c in quad],
+                # axis-aligned bounds, for hit-testing only
+                "x": round(min(xs), 1), "y": round(min(ys), 1),
+                "w": round(max(xs) - min(xs), 1), "h": round(max(ys) - min(ys), 1),
             })
         words.append(item)
     return {"words": words, "opts": o, "text": document.get("text", ""),

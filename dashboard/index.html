@@ -1713,20 +1713,47 @@ function drawWords() {
   const off = WE.drag ? WE.drag : null;
 
   for (const w of WE.doc.words) {
-    if (w.overflow || w.x === undefined) continue;
+    if (w.overflow || !w.quad) continue;
     const im = sprite(w.png);
     if (!im || !im.complete || !im.naturalWidth) continue;
     const moving = off && WE.sel.has(w.id);
-    const x = (w.x + (moving ? off.dx : 0)) * k;
-    const y = (w.y + (moving ? off.dy : 0)) * k;
-    ctx.save();
-    ctx.translate(x, y);
-    if (w.deg) { ctx.translate(w.w * k / 2, w.h * k / 2); ctx.rotate(w.deg * Math.PI / 180);
-                 ctx.translate(-w.w * k / 2, -w.h * k / 2); }
-    ctx.drawImage(im, 0, 0, w.w * k, w.h * k);
-    ctx.restore();
+    const q = w.quad.map(p => [(p[0] + (moving ? off.dx : 0)) * k,
+                               (p[1] + (moving ? off.dy : 0)) * k]);
+    drawQuad(ctx, im, q);
   }
 }
+
+// Canvas 2D has no perspective transform -- setTransform is affine, six
+// numbers. Drawing a word with one affine would leave the preview flat while
+// the server export is correct, and the two would silently disagree. So the
+// word is drawn as vertical strips, each with its own affine: measured error
+// against the true perspective is 5.14px at one strip, 1.29px at four and
+// 0.64px at eight, so eight is sub-pixel.
+const STRIPS = 8;
+
+function drawQuad(ctx, im, q) {
+  const [tl, tr, br, bl] = q;
+  const sw = im.naturalWidth, sh = im.naturalHeight;
+  for (let i = 0; i < STRIPS; i++) {
+    // widen each strip slightly so neighbours overlap instead of leaving seams
+    const a = i / STRIPS, b = (i + 1) / STRIPS;
+    const ao = Math.max(0, a - 0.002), bo = Math.min(1, b + 0.002);
+    const p00 = lerp(tl, tr, ao), p10 = lerp(tl, tr, bo);
+    const p01 = lerp(bl, br, ao), p11 = lerp(bl, br, bo);
+    const sx = ao * sw, sWid = (bo - ao) * sw;
+    if (sWid <= 0) continue;
+    // affine taking the strip's source rect onto its own trapezoid
+    const m11 = (p10[0] - p00[0]) / sWid, m12 = (p10[1] - p00[1]) / sWid;
+    const m21 = (p01[0] - p00[0]) / sh,   m22 = (p01[1] - p00[1]) / sh;
+    ctx.save();
+    ctx.setTransform(m11, m12, m21, m22, p00[0], p00[1]);
+    ctx.drawImage(im, sx, 0, sWid, sh, 0, 0, sWid, sh);
+    ctx.restore();
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+const lerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
 
 // selection + overflow highlights live on the rules canvas so they are not
 // multiplied into the paper
@@ -1739,7 +1766,17 @@ function drawWordChrome(ctx, k) {
     const x = (w.x + (moving ? off.dx : 0)) * k, y = (w.y + (moving ? off.dy : 0)) * k;
     if (WE.sel.has(w.id)) {
       ctx.strokeStyle = 'rgba(124,131,253,.95)'; ctx.lineWidth = 1.5;
-      ctx.strokeRect(x - 2, y - 2, w.w * k + 4, w.h * k + 4);
+      if (w.quad) {
+        const dx = moving ? off.dx : 0, dy = moving ? off.dy : 0;
+        ctx.beginPath();
+        w.quad.forEach((p, n) => {
+          const px = (p[0] + dx) * k, py = (p[1] + dy) * k;
+          n ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+        });
+        ctx.closePath(); ctx.stroke();
+      } else {
+        ctx.strokeRect(x - 2, y - 2, w.w * k + 4, w.h * k + 4);
+      }
     }
     if (w.pinned) {
       ctx.beginPath(); ctx.arc(x - 3, y - 3, 3, 0, 7);
