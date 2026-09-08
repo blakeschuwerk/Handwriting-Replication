@@ -100,6 +100,36 @@ def _estimate_spacing(profile):
     return int(pk[np.argmax(ac[lo:hi][pk])] + lo) if len(pk) else 0
 
 
+def _spacing_from_peaks(resp, cols=9, half=15):
+    """Rule spacing from the gaps between adjacent rules in narrow columns.
+
+    The autocorrelation of a wide strip picks whichever lag correlates best,
+    and that is not always the fundamental. On a steeply angled page it scored
+    a spurious lag of 145px at r=0.128 while the real 92px period sat at
+    r=0.026, five times weaker -- so the grid was laid out with rules 1.57x too
+    far apart and drifted off the ruling within a few lines.
+
+    Adjacent peaks in a narrow column are a far more direct measurement: the
+    column is too narrow to smear, a missed rule only produces one double-width
+    gap, and the median ignores those. Measured across six columns of the photo
+    that broke it, this returns 90.5 to 93.5px against a true 92.
+    """
+    H, W = resp.shape
+    gaps = []
+    for x in np.linspace(W * 0.15, W * 0.85, cols).astype(int):
+        col = resp[:, max(0, x - half):x + half].mean(axis=1)
+        col = col - col.min()
+        if col.max() <= 0:
+            continue
+        pk, _ = find_peaks(col, distance=12, height=col.max() * 0.22)
+        if len(pk) > 4:
+            g = np.diff(pk).astype(float)
+            gaps.extend(g[(g > 15) & (g < 400)])
+    if len(gaps) < 12:
+        return 0
+    return int(round(float(np.median(gaps))))
+
+
 def _track_rules(flat, spacing):
     """Seed on the centre slab, walk outwards snapping to the nearest peak.
 
@@ -150,15 +180,25 @@ def _track_rules(flat, spacing):
     return out
 
 
-def _consistent_run(rules):
-    """Longest evenly-spaced run. Drops desk clutter that also reads as blue."""
+def _consistent_run(rules, tol=0.35):
+    """Longest run whose spacing changes smoothly. Drops clutter that reads blue.
+
+    The test is on the ratio between successive gaps, not on how far each gap
+    sits from the median. Perspective makes the gaps ramp: on a page shot at a
+    steep angle the rules run from 69px apart at the top to 155px at the bottom,
+    a 2.2x range, and comparing against a median threw away the far half of
+    exactly the photos that need the most help. Between neighbours that ramp is
+    gentle -- successive gaps differ by a few percent -- while desk clutter
+    jumps, so neighbouring ratios separate the two cleanly.
+    """
     if len(rules) < 3:
         return rules
     gaps = np.diff([d["yc"] for d in rules])
-    med = np.median(gaps)
     best, run = [], [0]
     for i, g in enumerate(gaps):
-        if abs(g - med) < med * 0.35:
+        prev = gaps[i - 1] if i else g
+        ok = g > 0 and prev > 0 and abs(g / prev - 1.0) <= tol
+        if ok:
             run.append(i + 1)
         else:
             if len(run) > len(best):
@@ -420,7 +460,9 @@ def detect_sheet(bgr):
     else:
         track, Rinv, ang = flat, None, 0.0
 
-    spacing = _estimate_spacing(track[:, W // 2 - 100:W // 2 + 100].mean(axis=1))
+    spacing = _spacing_from_peaks(track)
+    if not spacing:
+        spacing = _estimate_spacing(track[:, W // 2 - 100:W // 2 + 100].mean(axis=1))
     if not spacing:
         raise ValueError("no ruling detected -- is the paper ruled in blue?")
     rules = _consistent_run(_track_rules(track, spacing))
@@ -610,7 +652,43 @@ def compose(bgr, sheet, placements, word_paths, scale=1.05,
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def sheet_json(sheet, response=None, n_points=24):
+def rule_alignment(sheet, response, samples=32):
+    """How far the drawn rules sit from the ink actually under them.
+
+    This is the honest measure of whether the fit is right, and it is not the
+    same thing as the fit residual. The residual is measured against the
+    observations the tracker produced, so a tracker that locked onto the wrong
+    period reports a small residual while drawing rules through blank paper.
+    This looks at the photo instead and asks, for points along each rule,
+    how far away the nearest blue line really is.
+    """
+    H, W = response.shape
+    sp = sheet.spacing_px(sheet.i_first + sheet.n_lines // 2, 0.0)
+    win = max(4, int(sp * 0.45))
+    offs = []
+    for k in range(sheet.n_lines):
+        us = np.linspace(sheet.u_left, sheet.u_right, samples)
+        xs, ys = sheet.xy(np.full(samples, float(sheet.i_first + k)), us)
+        for x, y in zip(xs, ys):
+            x, y = int(round(float(x))), int(round(float(y)))
+            if not (win < x < W - win and win < y < H - win):
+                continue
+            col = response[y - win:y + win + 1, max(0, x - 8):x + 9].mean(1)
+            if col.max() <= 0:
+                continue
+            j = int(np.argmax(col))
+            if col[j] < col.mean() + 0.5 * col.std():
+                continue
+            offs.append(j - win)
+    if len(offs) < 20:
+        return None
+    o = np.abs(np.array(offs, float))
+    return {"median_px": round(float(np.median(o)), 1),
+            "within": round(float((o <= max(4.0, sp * 0.06)).mean()), 3),
+            "spacing": round(float(sp), 1)}
+
+
+def sheet_json(sheet, response=None, n_points=24, obs=None):
     """Everything the UI needs to draw and manipulate the sheet."""
     lines = []
     for k in range(sheet.n_lines):
@@ -640,7 +718,29 @@ def sheet_json(sheet, response=None, n_points=24):
         "size": list(sheet.size),
     }
     if response is not None:
-        out["confidence"] = [round(c, 3) for c in _sheet.line_confidence(sheet, response)]
+        conf = [round(c, 3) for c in _sheet.line_confidence(sheet, response)]
+        out["confidence"] = conf
+    else:
+        conf = []
+
+    # Judged on where the ink actually is, not on the fit residual. A tracker
+    # that locked onto the wrong period reports a small residual while drawing
+    # rules across blank paper, which is exactly the failure this has to catch.
+    if response is not None:
+        al = rule_alignment(sheet, response)
+        if al:
+            weak = (sum(1 for c in conf if c < 0.35) / len(conf)) if conf else 0.0
+            out["fit"] = {
+                "resid_px": al["median_px"],
+                "resid_frac": round(al["median_px"] / max(1e-6, al["spacing"]), 3),
+                "within": al["within"],
+                "weak_frac": round(weak, 3),
+                # Loose on purpose: this only has to catch a fit that is
+                # visibly wrong, not grade a good one. A page that fits well
+                # lands ~75% of its samples on the ruling.
+                "poor": bool(al["within"] < 0.45 or al["median_px"] > al["spacing"] * 0.12),
+            }
+
     return out
 
 

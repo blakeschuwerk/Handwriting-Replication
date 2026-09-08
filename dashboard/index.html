@@ -518,6 +518,18 @@
         <button class="minibtn" id="p_resnap" title="re-solve against the ink">↻ snap to lines</button>
         <button class="minibtn" id="p_redetect" title="start detection over">reset</button>
       </div>
+      <div id="p_fitWarn" class="hidden" style="margin-top:8px;padding:9px 11px;border-radius:8px;
+           background:rgba(240,120,60,.12);border:1px solid rgba(240,120,60,.45);font-size:12.5px">
+        <b style="color:#f0a020">The ruled lines don't look right.</b>
+        <span id="p_fitWhy"></span>
+        <div class="muted" style="margin-top:4px">
+          Drag the four corner handles onto the writing area and press
+          <b>snap to lines</b>. Writing is held until the fit looks right, so
+          you don't end up with a page of text on the wrong lines.
+          <button class="btn ghost" id="p_fitAnyway"
+                  style="margin-left:6px;padding:2px 8px;font-size:11px">write anyway</button>
+        </div>
+      </div>
       <div class="muted" id="p_detinfo" style="font-size:12px;margin-top:6px"></div>
       <div class="muted" style="font-size:11px;margin-top:2px">Drag the four corner handles to set the writing area, or the red line to move the margin. The lines stay locked to the paper — you never draw one.</div>
 
@@ -1489,11 +1501,37 @@ function applyGeom(g) {
   const weak = conf.filter(c => c < 0.35).length;
   detInfo(`${g.count} ruled lines · spacing ${g.spacing}px`
     + (weak ? ` · ${weak} line${weak > 1 ? 's' : ''} with weak ink — check the fit` : ''));
+  applyFitVerdict(g.fit, weak, conf.length);
   $('#p_start').max = Math.max(0, g.count - 1);
   if (+$('#p_start').value > +$('#p_start').max) $('#p_start').value = $('#p_start').max;
   refreshRanges();
   drawRules();
 }
+
+// A bad fit used to be invisible until you generated a page and saw the text
+// sitting between the rules. It is now stated plainly, and writing is held,
+// because a wrong grid wastes a full generation pass to discover.
+let fitOverride = false;
+function applyFitVerdict(fit, weak, nLines) {
+  const bad = !!(fit && fit.poor) && !fitOverride;
+  $('#p_fitWarn').classList.toggle('hidden', !(fit && fit.poor));
+  if (fit && fit.poor) {
+    const why = [];
+    if (fit.resid_frac > 0.08)
+      why.push(`they sit ${fit.resid_px}px off the ink, `
+             + `${Math.round(fit.resid_frac * 100)}% of the line spacing`);
+    if (fit.weak_frac > 0.5)
+      why.push(`${weak} of ${nLines} lines have little ink under them`);
+    $('#p_fitWhy').textContent = ' ' + why.join('; ') + '.';
+  }
+  $('#paperBtn').disabled = bad;
+  $('#paperBtn').title = bad ? 'The ruled lines need checking first' : '';
+}
+$('#p_fitAnyway').onclick = () => {
+  fitOverride = true;
+  $('#paperBtn').disabled = false;
+  detInfo('writing with a fit that may be wrong — check the result');
+};
 
 async function showPaper() {
   const n = $('#p_paper').value;
@@ -1501,6 +1539,7 @@ async function showPaper() {
   $('#p_img').src = '/img/paper/' + encodeURIComponent(n);
   paperGeom = null; WE.doc = null; WE.sel.clear();
   drawRules(); drawWords();
+  fitOverride = false;
   detInfo('finding the ruled lines…');
   applyGeom(await (await fetch('/api/paper/detect?name=' + encodeURIComponent(n))).json());
 }

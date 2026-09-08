@@ -1019,7 +1019,7 @@ def paper_detect(name: str, rebuild: bool = False):
         st = _paper_state(name, rebuild)
     except Exception as exc:
         return {"error": str(exc)[:400]}
-    return _paper.sheet_json(st["sheet"], st["flat"])
+    return _paper.sheet_json(st["sheet"], st["flat"], obs=st.get("obs"))
 
 
 @app.post("/api/paper/adjust")
@@ -1083,7 +1083,7 @@ async def paper_adjust(payload: dict):
         sh.u_left, sh.u_right, sh.i_first, sh.n_lines, sh.margin_x = keep
 
     st["sheet"] = sh
-    return _paper.sheet_json(sh, st["flat"])
+    return _paper.sheet_json(sh, st["flat"], obs=st.get("obs"))
 
 
 # ---- editable document -----------------------------------------------------
