@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shlex
+import uuid
 import signal
 import subprocess
 import sys
@@ -1225,14 +1226,22 @@ def doc_view(document, sheet):
     """The document as the browser needs it: words placed in photo pixels."""
     o = dict(_doc.DEFAULTS)
     o.update(document.get("opts") or {})
+    boxes = {b["id"]: b for b in (document.get("boxes") or [])}
     words = []
     for w in sorted(document["words"], key=lambda d: d["ord"]):
         p = w.get("placed")
+        # A word inside a box is drawn at that box's text size, not the page's.
+        ow = o
+        b = boxes.get(w.get("box"))
+        if b:
+            ow = dict(o)
+            ow["scale"] = float(b.get("size") or o["scale"])
         item = {"id": w["id"], "text": w["text"], "pinned": bool(w.get("pin")),
                 "overflow": bool(w.get("overflow")), "clipped": bool(w.get("clipped")),
-                "png": os.path.basename(w["png"]) if w.get("png") else None}
+                "png": os.path.basename(w["png"]) if w.get("png") else None,
+                "box": w.get("box")}
         if p and not w.get("overflow"):
-            quad = _doc.word_quad(document, sheet, w, o)
+            quad = _doc.word_quad(document, sheet, w, ow)
             xs = [c[0] for c in quad]; ys = [c[1] for c in quad]
             item.update({
                 "line": p["line"], "u": round(p["u"], 4),
@@ -1245,7 +1254,18 @@ def doc_view(document, sheet):
                 "w": round(max(xs) - min(xs), 1), "h": round(max(ys) - min(ys), 1),
             })
         words.append(item)
-    return {"words": words, "opts": o, "text": document.get("text", ""),
+    box_out = []
+    for b in (document.get("boxes") or []):
+        u0, u1 = sorted((float(b["u0"]), float(b["u1"])))
+        v0, v1 = sorted((float(b["v0"]), float(b["v1"])))
+        corners = [sheet.point(v0, u0), sheet.point(v0, u1),
+                   sheet.point(v1, u1), sheet.point(v1, u0)]
+        box_out.append({"id": b["id"], "size": b.get("size"),
+                         "text": b.get("text") or "",
+                         "u0": u0, "v0": v0, "u1": u1, "v1": v1,
+                         "quad": [[round(float(x), 1), round(float(y), 1)]
+                                  for x, y in corners]})
+    return {"boxes": box_out, "words": words, "opts": o, "text": document.get("text", ""),
             "style": document.get("style"), "seed": document.get("seed"),
             "overflow": sum(1 for w in words if w["overflow"])}
 
@@ -1303,6 +1323,7 @@ def _sync_and_reflow(name, document, sheet, generate=True, log=None):
     if generate:
         _doc.ensure_words(document, str(WORDS), style=style, ckpt=ckpt, log=log)
     stats = _doc.reflow(document, sheet)
+    _doc.reflow_boxes(document, sheet)
     _doc.save(str(_doc_path(name)), document)
     return stats
 
@@ -1367,6 +1388,67 @@ async def doc_history(payload: dict):
     document = json.loads(stack.pop())
     _doc.save(str(_doc_path(name)), document)
     return doc_view(document, sheet)
+
+
+@app.post("/api/doc/box")
+async def doc_box(payload: dict):
+    """Create, move, resize or remove one text box."""
+    name = payload.get("name")
+    if not name:
+        return {"error": "no paper named"}
+    try:
+        st = _paper_state(name)
+    except Exception as exc:
+        return {"error": str(exc)[:400]}
+    sheet = st["sheet"]
+    document = _load_doc(name, sheet)
+    document.setdefault("boxes", [])
+    op = payload.get("op") or "create"
+    bid = payload.get("id")
+
+    if op == "create":
+        b = {"id": uuid.uuid4().hex[:10],
+             "u0": float(payload["u0"]), "v0": float(payload["v0"]),
+             "u1": float(payload["u1"]), "v1": float(payload["v1"]),
+             "size": float(payload.get("size") or (document.get("opts") or {}).get("scale") or 1.0),
+             "text": ""}
+        document["boxes"].append(b)
+        bid = b["id"]
+    elif op == "delete":
+        document["boxes"] = [b for b in document["boxes"] if b["id"] != bid]
+        document["words"] = [w for w in document["words"] if w.get("box") != bid]
+        _doc._regroup(document)
+    else:                                   # update geometry and/or size
+        for b in document["boxes"]:
+            if b["id"] != bid:
+                continue
+            for k in ("u0", "v0", "u1", "v1", "size"):
+                if payload.get(k) is not None:
+                    b[k] = float(payload[k])
+    _sync_and_reflow(name, document, sheet, generate=False)
+    out = doc_view(document, sheet)
+    out["box_id"] = bid
+    return out
+
+
+@app.post("/api/doc/boxtext")
+async def doc_boxtext(payload: dict):
+    """Set the text of one box. Diffed against that box's words only."""
+    name, bid = payload.get("name"), payload.get("id")
+    if not name or not bid:
+        return {"error": "need a paper and a box"}
+    try:
+        st = _paper_state(name)
+    except Exception as exc:
+        return {"error": str(exc)[:400]}
+    sheet = st["sheet"]
+    document = _load_doc(name, sheet)
+    _snapshot(name, document)
+    _doc.sync_text(document, payload.get("text") or "", box=bid)
+    _sync_and_reflow(name, document, sheet)
+    out = doc_view(document, sheet)
+    out["box_id"] = bid
+    return out
 
 
 @app.post("/api/doc/edit")

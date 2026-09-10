@@ -63,6 +63,10 @@ def new_doc(photo, sheet=None, seed=None):
         "sheet": sheet.to_json() if sheet is not None else None,
         "style": {"crop": None, "ckpt": "pretrained"},
         "opts": dict(DEFAULTS),
+        # Text boxes, in page space. A page whose layout the program cannot
+        # read -- a worksheet, a form -- is handled by letting the user say
+        # where text goes instead of inferring it.
+        "boxes": [],
         "words": [],
     }
 
@@ -88,6 +92,7 @@ def new_word(text, ord_, nl=0, tabs=0):
         "id": new_id(), "text": text, "ord": int(ord_),
         "nl": int(nl), "tabs": int(tabs),
         "png": None, "aspect": None, "scale": 1.0, "slant": 0.0, "dark": 1.0,
+        "box": None,
         "pin": None, "placed": None, "overflow": False, "clipped": False,
         "gen": None,
     }
@@ -147,14 +152,32 @@ def _lcs_pairs(a, b):
     return out[::-1]
 
 
-def sync_text(doc, text):
+def _regroup(doc):
+    """Flowing words first, then each box's words in the order the boxes sit."""
+    order = [b["id"] for b in (doc.get("boxes") or [])]
+    def key(w):
+        b = w.get("box")
+        rank = 0 if not b else 1 + (order.index(b) if b in order else len(order))
+        return (rank, w["ord"])
+    ws = sorted(doc["words"], key=key)
+    for k, w in enumerate(ws):
+        w["ord"] = k
+    doc["words"] = ws
+
+
+def sync_text(doc, text, box=None):
     """Update the word list from edited text, keeping ids for words that stayed.
 
     Diffed rather than rebuilt: re-parsing into fresh ids would discard every
     pin and every cached image on each keystroke, so a single typo would
     regenerate the page and move everything the user had positioned by hand.
     """
-    old = sorted(doc["words"], key=lambda w: w["ord"])
+    allw = sorted(doc["words"], key=lambda w: w["ord"])
+    # Each box owns its own run of words, so a diff has to be scoped to that
+    # run -- diffing a box's text against the whole page would match words from
+    # somewhere else entirely and drag their images and pins across.
+    old = [w for w in allw if (w.get("box") or None) == box]
+    others = [w for w in allw if (w.get("box") or None) != box]
     tokens = parse_text(text)
     keep = dict(_lcs_pairs([w["text"] for w in old], [t[0] for t in tokens]))
 
@@ -167,10 +190,19 @@ def sync_text(doc, text):
         else:
             w = src
             w["ord"], w["nl"], w["tabs"] = j, nl, tabs
+        w["box"] = box
         words.append(w)
     removed = len(old) - (len(words) - added)
-    doc["words"] = words
-    doc["text"] = text
+    for k, w in enumerate(words):
+        w["ord"] = k
+    doc["words"] = others + words
+    _regroup(doc)
+    if box is None:
+        doc["text"] = text
+    else:
+        for b in doc.get("boxes") or []:
+            if b["id"] == box:
+                b["text"] = text
     return {"added": added, "removed": max(0, removed), "total": len(words)}
 
 
@@ -329,6 +361,64 @@ def word_width(w, opts):
     return (w.get("aspect") or 3.0) * opts["scale"] * w.get("scale", 1.0)
 
 
+def reflow_boxes(doc, sheet=None, opts=None):
+    """Lay out each text box's words inside its own rectangle.
+
+    A box is the answer to pages this program cannot read. Rather than infer
+    where a worksheet wants writing -- which means understanding its layout, and
+    getting it wrong -- the user draws a rectangle on the paper and the text
+    wraps inside it. The rectangle lives in page space, so it sits square on the
+    sheet and its handwriting recedes with the perspective exactly as text on a
+    ruled line does.
+
+    Rows step by the box's own text size rather than by the page's ruling, since
+    there is no ruling here to follow.
+    """
+    o = dict(DEFAULTS)
+    o.update(doc.get("opts") or {})
+    o.update(opts or {})
+    boxes = {b["id"]: b for b in (doc.get("boxes") or [])}
+    if not boxes:
+        return 0
+
+    grouped = {}
+    for w in sorted(doc["words"], key=lambda w: w["ord"]):
+        bid = w.get("box")
+        if bid in boxes:
+            grouped.setdefault(bid, []).append(w)
+
+    over = 0
+    for bid, ws in grouped.items():
+        b = boxes[bid]
+        ob = dict(o)
+        ob["scale"] = float(b.get("size") or o["scale"])
+        step = ob["scale"]
+        space = ob["space_em"] * ob["scale"]
+        u0, u1 = sorted((float(b["u0"]), float(b["u1"])))
+        v0, v1 = sorted((float(b["v0"]), float(b["v1"])))
+        v, u, first = v0 + step, u0, True
+        for w in ws:
+            if w["nl"] and not first:
+                v += step * int(w["nl"])
+                u = u0
+            if w["tabs"]:
+                u += int(w["tabs"]) * ob["tab_em"] * ob["scale"]
+            first = False
+            width = word_width(w, ob)
+            if u > u0 + 1e-9 and u + width > u1:
+                v += step
+                u = u0
+            if v > v1 + 1e-6:
+                w["placed"], w["overflow"] = None, True
+                over += 1
+                continue
+            w["placed"] = {"line": v, "u": u}
+            w["overflow"] = False
+            w["orphaned"] = False
+            u += width + space
+    return over
+
+
 def reflow(doc, sheet, opts=None):
     """Place every unpinned word, packing around the pinned ones.
 
@@ -341,7 +431,8 @@ def reflow(doc, sheet, opts=None):
     hp = humanize_params(o["humanize"])
     space = o["space_em"] * o["scale"]
 
-    words = sorted(doc["words"], key=lambda w: w["ord"])
+    words = [w for w in sorted(doc["words"], key=lambda w: w["ord"])
+             if not w.get("box")]
     first_line = sheet.i_first + int(o["start_line"])
     last_line = sheet.i_first + sheet.n_lines - 1
 
