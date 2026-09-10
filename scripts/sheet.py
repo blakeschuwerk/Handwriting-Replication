@@ -295,6 +295,42 @@ class Sheet:
                 f"bow=({self.c1:+.3f},{self.c2:+.3f}))")
 
 
+def sheet_from_corners(corners, size, rows=30.0, aspect=8.5 / 11.0):
+    """Build a Sheet from the four corners of the page, with no ruling at all.
+
+    Everything else in this module infers the page from its ruled lines, which
+    is the right thing when there are ruled lines. A printed worksheet has none
+    -- or worse, has printed rules at wildly uneven spacing that no lattice can
+    describe -- yet it still sits at an angle and still needs handwriting to
+    recede with it. Four corners are enough: a homography has eight degrees of
+    freedom and four point correspondences supply exactly eight.
+
+    Page space is defined so one unit is one line height, with the sheet
+    ``rows`` units tall and ``rows * aspect`` wide (US Letter by default). That
+    keeps u and v in the same units the rest of the code already assumes, so a
+    sheet made this way is interchangeable with a detected one.
+
+    ``corners`` is [TL, TR, BR, BL] in pixels. No page bow is fitted -- a loose
+    sheet on a desk is flat enough, and there is no ruling here to measure a
+    curl against.
+    """
+    if corners is None or len(corners) != 4:
+        raise ValueError("need four page corners")
+    W, H = int(size[0]), int(size[1])
+    norm = Norm(W, H)
+    src = np.array([norm.to(float(x), float(y)) for x, y in corners], np.float32)
+    hv = float(rows)
+    wu = hv * float(aspect)
+    dst = np.array([[0.0, 0.0], [wu, 0.0], [wu, hv], [0.0, hv]], np.float32)
+    M = cv2.getPerspectiveTransform(src.reshape(4, 1, 2), dst.reshape(4, 1, 2))
+    # rows + 1 line indices, because 0..rows inclusive is what spans the sheet:
+    # with n_lines = rows the last index is rows-1 and the bottom edge of the
+    # page lands a whole row above the corner the user actually placed.
+    sh = Sheet(M, 0.0, 0.0, 0.0, wu, 0, int(round(hv)) + 1, (W, H))
+    sh.spacing_hint = sh.spacing_px(hv / 2.0, wu / 2.0)
+    return sh
+
+
 # ---------------------------------------------------------------------------
 # Fitting
 # ---------------------------------------------------------------------------

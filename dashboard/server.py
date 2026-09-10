@@ -1004,9 +1004,21 @@ def _paper_state(name, rebuild=False):
     st = _PAPER.get(name)
     if st is None or st["mtime"] != mt or rebuild:
         img = _paper.load_photo(str(path))
-        sheet, obs, info = _paper.detect_sheet(img)
+        try:
+            sheet, obs, info = _paper.detect_sheet(img)
+            undetected = False
+        except Exception as exc:
+            # A printed worksheet has no blue ruling to find, and failing hard
+            # here left no way to reach the page-corners tool -- every route to
+            # it goes through this state. Fall back to a plausible sheet built
+            # from the frame so the photo opens, and say so, rather than
+            # refusing to show a page the user can perfectly well set up by hand.
+            h, w = img.shape[:2]
+            inset = [[w * .1, h * .1], [w * .9, h * .1], [w * .9, h * .9], [w * .1, h * .9]]
+            sheet = _sheetmod.sheet_from_corners(inset, (w, h))
+            obs, info, undetected = None, {"error": str(exc)[:200]}, True
         st = {"sheet": sheet, "obs": obs, "flat": _paper._flat_response(img),
-              "mtime": mt, "grown": info.get("grown")}
+              "mtime": mt, "grown": info.get("grown"), "undetected": undetected}
         _PAPER.clear()        # only ever one page open at a time
         _PAPER[name] = st
     return st
@@ -1019,7 +1031,15 @@ def paper_detect(name: str, rebuild: bool = False):
         st = _paper_state(name, rebuild)
     except Exception as exc:
         return {"error": str(exc)[:400]}
-    return _paper.sheet_json(st["sheet"], st["flat"], obs=st.get("obs"))
+    out = _paper.sheet_json(st["sheet"], st["flat"], obs=st.get("obs"))
+    # "Undetected" has to mean "the answer is not usable", not "it threw". On a
+    # printed worksheet detection does not fail loudly -- it returns a confident
+    # grid with an inverted quad spanning well past the photo. The alignment
+    # measure already knows the difference, so reuse it and let the UI offer the
+    # page-corners tool instead of showing a heap of lines over the page.
+    fit = out.get("fit") or {}
+    out["undetected"] = bool(st.get("undetected") or fit.get("poor"))
+    return out
 
 
 @app.post("/api/paper/adjust")
@@ -1042,6 +1062,18 @@ async def paper_adjust(payload: dict):
 
     sh = _sheetmod.Sheet.from_json(payload["sheet"]) if payload.get("sheet") else st["sheet"]
     sh = _sheetmod.Sheet.from_json(sh.to_json())      # work on a copy
+
+    # Page corners: rebuild the whole sheet from four hand-placed points. This
+    # is the path for a printed worksheet, where there is no ruling to infer the
+    # page from -- or worse, printed rules at spacings no lattice can describe.
+    # A homography needs eight numbers and four corners supply exactly eight, so
+    # nothing else is required to make handwriting recede with the paper.
+    if payload.get("page_corners"):
+        pc = [[float(x), float(y)] for x, y in payload["page_corners"]]
+        rows = float(payload.get("rows") or 30.0)
+        sh = _sheetmod.sheet_from_corners(pc, sh.size, rows=rows)
+        st["sheet"] = sh
+        return _paper.sheet_json(sh, st["flat"], obs=None)
 
     # Free shape: the four corners are kept exactly where they were put, and
     # the writing area becomes that quadrilateral rather than a page-space
