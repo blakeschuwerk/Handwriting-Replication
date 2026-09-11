@@ -1774,6 +1774,7 @@ function scheduleDraw() {
 // --- dragging the writing area -------------------------------------------
 $('#p_ov').addEventListener('pointerdown', (e) => {
   if (wordsOn()) return;
+  $('#p_preview').focus({ preventScroll: true });
   if (!paperGeom || !$('#p_showlines').checked) return;
   const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
   const mx = e.clientX - r.left, my = e.clientY - r.top;
@@ -1846,7 +1847,7 @@ function setMode(m) {
   // anything when the image has no layout yet, so toggling it there left the
   // palette hidden whenever word mode was entered before the photo settled.
   const pal = $('#p_palette');
-  if (pal) pal.classList.toggle('hidden', m !== 'words');
+  if (pal) { pal.classList.toggle('hidden', m !== 'words'); placePalette(); }
   $('#p_ov').style.cursor = m === 'words' ? 'default' : 'crosshair';
   if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   if (m === 'words' && !WE.doc && $('#p_paper').value) loadDoc();
@@ -2134,6 +2135,28 @@ async function cancelBoxTyping() {
   WE.boxSel = null; drawRules(); scheduleWords();
 }
 
+// The palette is pinned to the top-left of the photo, but the page header is
+// sticky and sits above it, so with the photo scrolled up the T button ends up
+// underneath the header and a click lands on the header instead. Keep it just
+// below whatever is covering the top of the photo.
+function placePalette() {
+  const pal = $('#p_palette'), box = $('#p_preview');
+  if (!pal || !box || pal.classList.contains('hidden')) return;
+  const r = box.getBoundingClientRect();
+  let hdr = 0;
+  document.querySelectorAll('body *').forEach(el => {
+    if (box.contains(el) || !el.offsetHeight) return;
+    const cs = getComputedStyle(el);
+    if (cs.position === 'sticky' || cs.position === 'fixed') {
+      hdr = Math.max(hdr, el.getBoundingClientRect().bottom);
+    }
+  });
+  const want = Math.max(10, hdr + 8 - r.top);
+  pal.style.top = Math.min(want, Math.max(10, r.height - pal.offsetHeight - 10)) + 'px';
+}
+addEventListener('scroll', placePalette, { passive: true });
+addEventListener('resize', placePalette);
+
 function setTool(t) {
   WE.tool = t;
   $('#p_toolPick').classList.toggle('on', t === 'pick');
@@ -2215,7 +2238,11 @@ function selectRange(a, b) {
 $('#p_ov').addEventListener('pointerdown', (e) => {
   // Take the keyboard first, whatever mode we are in. pointerdown calls
   // preventDefault below, which suppresses the browser's own focus handling.
-  $('#p_preview').focus();
+  // preventScroll matters: the preview is taller than the window, so a plain
+  // focus() scrolled it into view on every press -- the page jumped the
+  // instant you put the mouse down, and the box you were drawing ended up
+  // somewhere other than where you aimed.
+  $('#p_preview').focus({ preventScroll: true });
   if (!wordsOn()) return;
   const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
   const px = (e.clientX - r.left) / k, py = (e.clientY - r.top) / k;
@@ -2290,7 +2317,11 @@ $('#p_ov').addEventListener('pointerdown', (e) => {
 });
 
 $('#p_ov').addEventListener('pointermove', (e) => {
-  if (!wordsOn() || !WE.doc) return;
+  // No document check here. pointerdown lets you start drawing a box without
+  // one, and this returning early meant the rectangle never grew past its
+  // first point -- so pointerup saw a zero-size drag and made nothing. The
+  // branches below that need the document test for it themselves.
+  if (!wordsOn()) return;
   const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
   const px = (e.clientX - r.left) / k, py = (e.clientY - r.top) / k;
   if (WE.boxDraw) {
@@ -2298,13 +2329,14 @@ $('#p_ov').addEventListener('pointermove', (e) => {
   }
   if (WE.boxDrag) {
     const g = WE.boxDrag;
+    const snap = !g.sent; g.sent = true;
     if (g.kind === 'corner') {
-      boxLive({ op: 'update', id: g.id, px: [[px, py], g.opp] });
+      boxLive({ op: 'update', id: g.id, px: [[px, py], g.opp], snapshot: snap });
     } else {
       // Down for bigger, up for smaller; dragging by the box's own height
       // doubles or halves the handwriting.
       const size = Math.min(4, Math.max(0.15, g.size0 * (1 + (py - g.y0) / g.h0)));
-      boxLive({ op: 'update', id: g.id, size });
+      boxLive({ op: 'update', id: g.id, size, snapshot: snap });
     }
     return;
   }
@@ -2312,11 +2344,13 @@ $('#p_ov').addEventListener('pointermove', (e) => {
     const m = WE.boxMove;
     if (Math.abs(px - m.from[0]) + Math.abs(py - m.from[1]) > 2) m.moved = true;
     if (m.moved) {
-      boxLive({ op: 'move', id: m.id, px_from: m.from, px_to: [px, py] });
+      const snap = !m.sent; m.sent = true;
+      boxLive({ op: 'move', id: m.id, px_from: m.from, px_to: [px, py], snapshot: snap });
       m.from = [px, py];
     }
     return;
   }
+  if (!WE.doc) return;
   if (WE.drag) {
     WE.drag.dx = px - WE.drag.x0; WE.drag.dy = py - WE.drag.y0;
     if (Math.abs(WE.drag.dx) + Math.abs(WE.drag.dy) > 2) WE.drag.moved = true;

@@ -1422,6 +1422,10 @@ async def doc_text(payload: dict):
     except Exception as exc:
         return {"error": str(exc)[:400]}
     document = _load_doc(name, st["sheet"])
+    # Writing a page replaces every word on it. It was the largest edit in the
+    # app and the only mutating endpoint that never took a snapshot, so Ctrl+Z
+    # could undo a nudge but not a whole page of generated handwriting.
+    _snapshot(name, document)
     if payload.get("style"):
         document["style"] = payload["style"]
     if payload.get("opts"):
@@ -1473,6 +1477,12 @@ async def doc_box(payload: dict):
     document.setdefault("boxes", [])
     op = payload.get("op") or "create"
     bid = payload.get("id")
+    # Drawing, deleting and each drag *gesture* are undoable. A live drag sends
+    # many updates, so the client flags only the first of a gesture -- snapshot
+    # every one and a single drag would fill the undo stack with one entry per
+    # pointermove and Ctrl+Z would crawl back a pixel at a time.
+    if op in ("create", "delete") or payload.get("snapshot"):
+        _snapshot(name, document)
 
     # The browser works in pixels and sends pixels. Page geometry stays on this
     # side -- converting here is what keeps a box square to the sheet, and keeps
