@@ -287,6 +287,10 @@
   kbd { background: var(--panel2); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; font-size: 11px; font-family: inherit; }
   /* Says plainly which surface owns the keyboard. */
   #p_preview:focus { box-shadow: 0 0 0 3px rgba(90,150,255,.75); }
+  .toolbtn { background:transparent; border:1px solid transparent; color:#dfe6f2;
+             border-radius:7px; padding:4px 9px; font-size:14px; cursor:pointer; line-height:1.1 }
+  .toolbtn:hover { background:rgba(255,255,255,.09) }
+  .toolbtn.on { background:var(--accent,#5b7cfa); color:#fff; border-color:transparent }
 </style>
 </head>
 <body>
@@ -508,6 +512,28 @@
         <img id="p_img" alt="paper" style="max-width:100%;border-radius:8px;display:block">
         <canvas id="p_words" style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;mix-blend-mode:multiply"></canvas>
         <canvas id="p_ov" style="position:absolute;left:0;top:0;width:100%;height:100%;cursor:crosshair;touch-action:none"></canvas>
+        <!-- A real textarea, floated over the box being typed into. Hand-rolling
+             a caret would mean reimplementing selection, paste and IME; this way
+             copy-paste between boxes is just the browser doing its job. -->
+        <textarea id="p_boxInput" class="hidden" spellcheck="false"
+          style="position:absolute;z-index:6;resize:none;border:2px solid #5b7cfa;
+                 border-radius:4px;background:rgba(255,255,255,.94);color:#111;
+                 padding:4px 6px;font:15px/1.35 system-ui,sans-serif;outline:none"></textarea>
+        <div id="p_palette" class="hidden" style="position:absolute;left:10px;top:10px;z-index:5;
+             display:flex;gap:4px;padding:5px;border-radius:10px;
+             background:rgba(18,22,28,.88);border:1px solid rgba(255,255,255,.14);
+             box-shadow:0 4px 14px rgba(0,0,0,.35)">
+          <button id="p_toolPick" class="toolbtn on" title="Select and edit words">&#10132;</button>
+          <button id="p_toolBox" class="toolbtn" title="Text box — drag on the page to draw one">
+            <span style="border:1.5px solid currentColor;border-radius:3px;padding:0 4px;font-weight:700">T</span>
+          </button>
+          <span id="p_boxSizeWrap" class="hidden"
+                style="display:flex;align-items:center;gap:6px;padding:0 6px;color:#dfe6f2;font-size:12px">
+            <span style="font-weight:700">Aa</span>
+            <input id="p_boxSize" type="range" min="0.25" max="2" step="0.05" style="width:96px">
+            <span id="p_boxSizeVal" class="muted" style="min-width:26px">1.0</span>
+          </span>
+        </div>
       </div>
       <div class="flex" style="margin-top:8px;align-items:center;flex-wrap:wrap;gap:8px">
         <div class="segbar">
@@ -1691,6 +1717,9 @@ function drawRules() {
   ctx.strokeStyle = 'rgba(230,120,255,.85)'; path(paperGeom.right);
 
   if (typeof drawWordChrome === 'function') drawWordChrome(ctx, k);
+  const pal = $('#p_palette');
+  if (pal) pal.classList.toggle('hidden', WE.mode !== 'words');
+  syncBoxSize();
   if (WE.mode === 'words') return;   // no sheet handles while editing words
   if (paperGeom.crop) {
     ctx.strokeStyle = 'rgba(240,160,60,.95)'; ctx.lineWidth = 2;
@@ -1781,6 +1810,7 @@ $('#p_ov').addEventListener('pointerup', async (e) => {
 // Canvas, not DOM nodes. The box editor rebuilds every element on each mouse
 // move; at a few hundred words over a 4032px photo that is unusable.
 const WE = { doc: null, sel: new Set(), sprites: new Map(), mode: 'lines', marq: null,
+  tool: 'pick', boxSel: null, boxDraw: null, boxDrag: null,
              drag: null, range: false, anchor: null, dirty: false };
 
 function wordsOn() { return WE.mode === 'words'; }
@@ -1911,8 +1941,138 @@ const lerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
 
 // selection + overflow highlights live on the rules canvas so they are not
 // multiplied into the paper
+// ---- text boxes -----------------------------------------------------------
+// A box is a rectangle in page space, so on a tilted photo it draws as a quad.
+// Its corners are placed in pixels and converted on the server; the browser
+// never does sheet maths, which is what keeps one definition of where things
+// are.
+const boxes = () => (WE.doc && WE.doc.boxes) || [];
+const boxById = (id) => boxes().find(b => b.id === id) || null;
+
+function boxAt(px, py) {
+  for (let i = boxes().length - 1; i >= 0; i--) {
+    const q = boxes()[i].quad;
+    if (!q) continue;
+    let inside = false;
+    for (let a = 0, b = 3; a < 4; b = a++) {
+      const [xa, ya] = q[a], [xb, yb] = q[b];
+      if ((ya > py) !== (yb > py) && px < (xb - xa) * (py - ya) / (yb - ya) + xa) inside = !inside;
+    }
+    if (inside) return boxes()[i];
+  }
+  return null;
+}
+
+function boxHandle(b, px, py, k) {
+  let best = -1, bd = 14 / k;
+  (b.quad || []).forEach((c, i) => {
+    const d = Math.hypot(c[0] - px, c[1] - py);
+    if (d < bd) { bd = d; best = i; }
+  });
+  return best;
+}
+
+async function boxPost(body) {
+  const r = await docPost('/api/doc/box', body);
+  if (r && r.box_id) WE.boxSel = r.box_id;
+  drawRules(); scheduleWords();
+  return r;
+}
+
+// An empty box left behind is just clutter, so it goes when you click away.
+async function dropEmptyBox(id) {
+  const b = boxById(id);
+  if (!b || (b.text || '').trim()) return false;
+  await docPost('/api/doc/box', { op: 'delete', id });
+  if (WE.boxSel === id) WE.boxSel = null;
+  drawRules(); scheduleWords();
+  return true;
+}
+
+function drawBoxes(ctx, k) {
+  for (const b of boxes()) {
+    const q = b.quad; if (!q) continue;
+    const on = WE.boxSel === b.id;
+    ctx.beginPath();
+    q.forEach((p, n) => { const x = p[0]*k, y = p[1]*k; n ? ctx.lineTo(x,y) : ctx.moveTo(x,y); });
+    ctx.closePath();
+    ctx.strokeStyle = on ? 'rgba(90,150,255,.95)' : 'rgba(90,150,255,.45)';
+    ctx.lineWidth = on ? 2 : 1;
+    ctx.setLineDash(on ? [] : [6, 5]); ctx.stroke(); ctx.setLineDash([]);
+    if (!on) continue;
+    q.forEach(p => {
+      ctx.beginPath(); ctx.arc(p[0]*k, p[1]*k, 5, 0, 7);
+      ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = '#5b7cfa'; ctx.stroke();
+    });
+  }
+  if (WE.boxDraw) {
+    const d = WE.boxDraw;
+    const x = Math.min(d.x0,d.x1)*k, y = Math.min(d.y0,d.y1)*k;
+    ctx.strokeStyle = 'rgba(90,150,255,.95)'; ctx.lineWidth = 1.5;
+    ctx.setLineDash([5,4]);
+    ctx.strokeRect(x, y, Math.abs(d.x1-d.x0)*k, Math.abs(d.y1-d.y0)*k);
+    ctx.setLineDash([]);
+  }
+}
+
+// Typing happens in a textarea floated over the box; the handwriting is
+// generated when you commit, not on every keystroke -- each word is a model
+// call, so per-keystroke generation would be unusable.
+let boxTyping = null;
+
+function startBoxTyping(id) {
+  const b = boxById(id); if (!b || !b.quad) return;
+  const ta = $('#p_boxInput'), k = pscale();
+  const xs = b.quad.map(c => c[0]*k), ys = b.quad.map(c => c[1]*k);
+  ta.style.left = Math.min(...xs) + 'px';
+  ta.style.top = Math.min(...ys) + 'px';
+  ta.style.width = Math.max(60, Math.max(...xs) - Math.min(...xs)) + 'px';
+  ta.style.height = Math.max(28, Math.max(...ys) - Math.min(...ys)) + 'px';
+  ta.value = b.text || '';
+  ta.classList.remove('hidden');
+  boxTyping = id;
+  WE.boxSel = id;
+  ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+  drawRules();
+}
+
+async function commitBoxTyping() {
+  if (!boxTyping) return;
+  const id = boxTyping, ta = $('#p_boxInput');
+  const text = ta.value;
+  boxTyping = null;
+  ta.classList.add('hidden'); ta.value = '';
+  const b = boxById(id);
+  if (!text.trim()) { await dropEmptyBox(id); return; }
+  if (b && (b.text || '') === text) { drawRules(); return; }
+  detInfo('writing the box…');
+  const r = await docPost('/api/doc/boxtext', { id, text });
+  detInfo(r && r.error ? r.error : `${(r.words||[]).length} words on the page`);
+  drawRules(); scheduleWords();
+}
+
+// The size of a box's handwriting, in line heights. Shown only while a box is
+// selected, because it belongs to that box and not to the page.
+function syncBoxSize() {
+  const b = WE.boxSel ? boxById(WE.boxSel) : null;
+  $('#p_boxSizeWrap').classList.toggle('hidden', !b);
+  if (!b) return;
+  $('#p_boxSize').value = b.size || 1;
+  $('#p_boxSizeVal').textContent = (+(b.size || 1)).toFixed(2);
+}
+
+function setTool(t) {
+  WE.tool = t;
+  $('#p_toolPick').classList.toggle('on', t === 'pick');
+  $('#p_toolBox').classList.toggle('on', t === 'box');
+  $('#p_ov').style.cursor = t === 'box' ? 'crosshair' : 'default';
+  detInfo(t === 'box' ? 'drag on the page to draw a text box' : '');
+}
+
 function drawWordChrome(ctx, k) {
   if (!WE.doc || !Array.isArray(WE.doc.words) || !wordsOn()) return;
+  drawBoxes(ctx, k);
   if (WE.marq && WE.marq.moved) {
     const m = WE.marq;
     const x = Math.min(m.x0, m.x1) * k, y = Math.min(m.y0, m.y1) * k;
@@ -1987,7 +2147,36 @@ $('#p_ov').addEventListener('pointerdown', (e) => {
   if (!wordsOn() || !WE.doc) return;
   const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
   const px = (e.clientX - r.left) / k, py = (e.clientY - r.top) / k;
+  // Clicking the page commits whatever box you were typing in. Relying on blur
+  // alone loses the text if the element is torn down by a redraw first.
+  if (boxTyping) { commitBoxTyping(); }
+  if (WE.tool === 'box') {
+    WE.boxDraw = { x0: px, y0: py, x1: px, y1: py };
+    cv.setPointerCapture(e.pointerId); e.preventDefault(); return;
+  }
+  // A selected box's own handles win over anything underneath them.
+  if (WE.boxSel) {
+    const b = boxById(WE.boxSel);
+    const h = b ? boxHandle(b, px, py, pscale()) : -1;
+    if (h >= 0) {
+      WE.boxDrag = { id: b.id, corner: h, opp: b.quad[(h + 2) % 4].slice() };
+      cv.setPointerCapture(e.pointerId); e.preventDefault(); return;
+    }
+  }
   const hit = hitWord(px, py);
+  const overBox = hit ? null : boxAt(px, py);
+  if (overBox && (e.detail > 1 || WE.boxSel === overBox.id)) {
+    startBoxTyping(overBox.id);
+    cv.setPointerCapture(e.pointerId); e.preventDefault(); return;
+  }
+  if (overBox) {
+    const prev = WE.boxSel;
+    WE.boxSel = overBox.id;
+    if (prev && prev !== overBox.id) dropEmptyBox(prev);
+    WE.sel.clear(); selInfo(); drawRules(); scheduleWords();
+    cv.setPointerCapture(e.pointerId); e.preventDefault(); return;
+  }
+  if (WE.boxSel && !hit) { const prev = WE.boxSel; WE.boxSel = null; dropEmptyBox(prev); }
   const idx = hit ? WE.doc.words.indexOf(hit) : docIndexAt(px, py);
 
   if (hit && e.shiftKey && WE.anchor != null) {
@@ -2022,6 +2211,22 @@ $('#p_ov').addEventListener('pointermove', (e) => {
   if (!wordsOn() || !WE.doc) return;
   const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
   const px = (e.clientX - r.left) / k, py = (e.clientY - r.top) / k;
+  if (WE.boxDraw) {
+    WE.boxDraw.x1 = px; WE.boxDraw.y1 = py; drawRules(); return;
+  }
+  if (WE.boxDrag) {
+    WE.boxDrag.x = px; WE.boxDrag.y = py;
+    const b = boxById(WE.boxDrag.id);
+    if (b) {                       // live preview; the server has the last word
+      const q = b.quad.map(c => c.slice());
+      q[WE.boxDrag.corner] = [px, py];
+      const o = WE.boxDrag.opp, c = WE.boxDrag.corner;
+      q[(c + 1) % 4] = (c % 2 === 0) ? [o[0], py] : [px, o[1]];
+      q[(c + 3) % 4] = (c % 2 === 0) ? [px, o[1]] : [o[0], py];
+      b.quad = q; drawRules();
+    }
+    return;
+  }
   if (WE.drag) {
     WE.drag.dx = px - WE.drag.x0; WE.drag.dy = py - WE.drag.y0;
     if (Math.abs(WE.drag.dx) + Math.abs(WE.drag.dy) > 2) WE.drag.moved = true;
@@ -2045,6 +2250,22 @@ $('#p_ov').addEventListener('pointerup', async (e) => {
   if (!wordsOn()) return;
   const cv = $('#p_ov');
   try { cv.releasePointerCapture(e.pointerId); } catch (_) {}
+  if (WE.boxDraw) {
+    const d = WE.boxDraw; WE.boxDraw = null;
+    const big = Math.abs(d.x1 - d.x0) > 12 && Math.abs(d.y1 - d.y0) > 12;
+    if (big) {
+      const r = await boxPost({ op: 'create', px: [[d.x0, d.y0], [d.x1, d.y1]] });
+      if (r && !r.error) { setTool('pick'); startBoxTyping(WE.boxSel); }
+    } else { drawRules(); }
+    return;
+  }
+  if (WE.boxDrag) {
+    const g = WE.boxDrag; WE.boxDrag = null;
+    if (g.x !== undefined) {
+      await boxPost({ op: 'update', id: g.id, px: [[g.x, g.y], g.opp] });
+    } else { drawRules(); }
+    return;
+  }
   if (WE.marq) {
     const wasClick = !WE.marq.moved;
     WE.marq = null;
@@ -2183,6 +2404,24 @@ $('#p_clear').onclick = async () => {
 };
 if ($('#p_free')) $('#p_free').onclick = () => setFreeShape(!freeShape);
 if ($('#p_page')) $('#p_page').onclick = () => setPageCorners(!pageCorners);
+$('#p_boxInput').addEventListener('blur', commitBoxTyping);
+$('#p_boxInput').addEventListener('keydown', (e) => {
+  e.stopPropagation();                       // the page's editor must not see these
+  if (e.key === 'Escape' || (e.key === 'Enter' && (e.metaKey || e.ctrlKey))) {
+    e.preventDefault(); $('#p_boxInput').blur();
+  }
+});
+$('#p_boxSize').oninput = () => {
+  $('#p_boxSizeVal').textContent = (+$('#p_boxSize').value).toFixed(2);
+  const b = WE.boxSel ? boxById(WE.boxSel) : null;
+  if (b) b.size = +$('#p_boxSize').value;
+};
+$('#p_boxSize').onchange = async () => {
+  if (!WE.boxSel) return;
+  await boxPost({ op: 'update', id: WE.boxSel, size: +$('#p_boxSize').value });
+};
+$('#p_toolPick').onclick = () => setTool('pick');
+$('#p_toolBox').onclick  = () => setTool(WE.tool === 'box' ? 'pick' : 'box');
 $('#p_seedNew').onclick = () => { $('#p_seed').value = Math.floor(Math.random() * 100000); };
 $('#p_paper').onchange = showPaper;
 $('#p_showlines').onchange = drawRules;

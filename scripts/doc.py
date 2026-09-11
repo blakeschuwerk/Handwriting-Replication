@@ -396,7 +396,16 @@ def reflow_boxes(doc, sheet=None, opts=None):
         space = ob["space_em"] * ob["scale"]
         u0, u1 = sorted((float(b["u0"]), float(b["u1"])))
         v0, v1 = sorted((float(b["v0"]), float(b["v1"])))
-        v, u, first = v0 + step, u0, True
+        # First baseline one line-height below the top edge, so text starts at
+        # the top of the box. A box drawn round a fill-in blank is thinner than
+        # a whole line, though, and that put the very first baseline past the
+        # bottom edge -- every word overflowed and the box came out empty. In
+        # that case the text sits on the box's bottom edge instead, which is
+        # exactly where a blank wants to be written on.
+        v = v0 + step
+        if v > v1:
+            v = v1
+        u, first = u0, True
         for w in ws:
             if w["nl"] and not first:
                 v += step * int(w["nl"])

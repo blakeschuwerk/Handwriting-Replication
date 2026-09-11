@@ -999,6 +999,43 @@ import sheet as _sheetmod       # noqa: E402
 _PAPER = {}   # name -> {sheet, obs, flat, mtime}
 
 
+def _saved_sheet(name):
+    """The sheet stored with this page's document, if the user set one up."""
+    path = _doc_path(name)
+    if not path.exists():
+        return None
+    try:
+        d = _doc.load(str(path))
+        js = d.get("sheet")
+        return _sheetmod.Sheet.from_json(js) if js else None
+    except Exception:
+        return None
+
+
+def _forget_sheet(name):
+    """Drop a hand-made sheet so detection can start over."""
+    try:
+        path = _doc_path(name)
+        if not path.exists():
+            return
+        d = _doc.load(str(path))
+        d["sheet"] = None
+        _doc.save(str(path), d)
+    except Exception:
+        pass
+
+
+def _remember_sheet(name, sheet):
+    """Persist the sheet alongside the document so a restart keeps it."""
+    try:
+        path = _doc_path(name)
+        d = _doc.load(str(path)) if path.exists() else _doc.new_doc(name, sheet)
+        d["sheet"] = sheet.to_json()
+        _doc.save(str(path), d)
+    except Exception:
+        pass
+
+
 def _paper_state(name, rebuild=False):
     path = _paper_path(name)
     mt = path.stat().st_mtime
@@ -1018,8 +1055,24 @@ def _paper_state(name, rebuild=False):
             inset = [[w * .1, h * .1], [w * .9, h * .1], [w * .9, h * .9], [w * .1, h * .9]]
             sheet = _sheetmod.sheet_from_corners(inset, (w, h))
             obs, info, undetected = None, {"error": str(exc)[:200]}, True
+
+        # A sheet the user set up by hand outlives the cache. Page corners are
+        # the only geometry a worksheet has, and re-detecting on every restart
+        # threw them away and put the garbage grid back. "reset" still forces a
+        # fresh detection.
+        saved = _saved_sheet(name)
+        if saved is not None:
+            sheet = saved
+            if getattr(sheet, "from_corners", False):
+                undetected = False
+        manual = bool(getattr(sheet, "from_corners", False))
+
         st = {"sheet": sheet, "obs": obs, "flat": _paper._flat_response(img),
-              "mtime": mt, "grown": info.get("grown"), "undetected": undetected}
+              "mtime": mt, "grown": info.get("grown"), "undetected": undetected,
+              # A sheet the user built has no ink to score against, so the
+              # alignment check would call it poor forever and keep nagging
+              # about a problem they have already solved by hand.
+              "manual": manual}
         _PAPER.clear()        # only ever one page open at a time
         _PAPER[name] = st
     return st
@@ -1028,6 +1081,8 @@ def _paper_state(name, rebuild=False):
 @app.get("/api/paper/detect")
 def paper_detect(name: str, rebuild: bool = False):
     """Ruled-line geometry for the overlay."""
+    if rebuild:
+        _forget_sheet(name)
     try:
         st = _paper_state(name, rebuild)
     except Exception as exc:
@@ -1039,7 +1094,11 @@ def paper_detect(name: str, rebuild: bool = False):
     # measure already knows the difference, so reuse it and let the UI offer the
     # page-corners tool instead of showing a heap of lines over the page.
     fit = out.get("fit") or {}
-    out["undetected"] = bool(st.get("undetected") or fit.get("poor"))
+    manual = bool(st.get("manual"))
+    out["manual"] = manual
+    out["undetected"] = bool(not manual and (st.get("undetected") or fit.get("poor")))
+    if manual and out.get("fit"):
+        out["fit"]["poor"] = False
     return out
 
 
@@ -1074,6 +1133,9 @@ async def paper_adjust(payload: dict):
         rows = float(payload.get("rows") or 30.0)
         sh = _sheetmod.sheet_from_corners(pc, sh.size, rows=rows)
         st["sheet"] = sh
+        st["undetected"] = False
+        st["manual"] = True
+        _remember_sheet(name, sh)
         return _paper.sheet_json(sh, st["flat"], obs=None)
 
     # Free shape: the four corners are kept exactly where they were put, and
@@ -1170,6 +1232,7 @@ async def paper_adjust(payload: dict):
                 sh.i_first, sh.n_lines = got
 
     st["sheet"] = sh
+    _remember_sheet(name, sh)
     return _paper.sheet_json(sh, st["flat"], obs=st.get("obs"))
 
 
@@ -1406,11 +1469,32 @@ async def doc_box(payload: dict):
     op = payload.get("op") or "create"
     bid = payload.get("id")
 
+    # The browser works in pixels and sends pixels. Page geometry stays on this
+    # side -- converting here is what keeps a box square to the sheet, and keeps
+    # there being one definition of where anything is.
+    px = payload.get("px")
+    if px and len(px) == 2:
+        uv = [sheet.uv(float(x), float(y)) for x, y in px]
+        us = [float(a[0][0]) for a in uv]
+        vs = [float(a[1][0]) for a in uv]
+        payload = dict(payload)
+        payload["u0"], payload["u1"] = min(us), max(us)
+        payload["v0"], payload["v1"] = min(vs), max(vs)
+
     if op == "create":
         b = {"id": uuid.uuid4().hex[:10],
              "u0": float(payload["u0"]), "v0": float(payload["v0"]),
              "u1": float(payload["u1"]), "v1": float(payload["v1"]),
-             "size": float(payload.get("size") or (document.get("opts") or {}).get("scale") or 1.0),
+             # Default the text to the height of the box the user drew. A page's
+             # line height is meaningless on a worksheet -- one row here is
+             # 139px while the printed text is about 45px -- so inheriting the
+             # page scale made handwriting roughly three times too big for a
+             # fill-in blank. A box drawn round a blank should write at the size
+             # of that blank; capped at the page scale so a tall box does not
+             # produce giant text.
+             "size": float(payload.get("size")
+                           or min(float((document.get("opts") or {}).get("scale") or 1.0),
+                                  abs(float(payload["v1"]) - float(payload["v0"])))),
              "text": ""}
         document["boxes"].append(b)
         bid = b["id"]

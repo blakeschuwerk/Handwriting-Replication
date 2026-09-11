@@ -771,6 +771,12 @@ def compose_doc(bgr, sheet, document, scale=None, darkness=None):
     if darkness is not None:
         o["darkness"] = darkness
     hp = _doc.humanize_params(o["humanize"])
+    # A word inside a text box is drawn at that box's size, not the page's.
+    # Laying out at one scale and drawing at another is how words ended up
+    # overlapping into "estudiantesdcespanol": the gaps were computed from the
+    # box's smaller size while the sprites were still drawn page-sized.
+    box_scale = {b["id"]: float(b.get("size") or o["scale"])
+                 for b in (document.get("boxes") or [])}
 
     out = bgr.astype(np.float32)
     H, W = out.shape[:2]
@@ -780,7 +786,11 @@ def compose_doc(bgr, sheet, document, scale=None, darkness=None):
     for w in sorted(document["words"], key=lambda d: d["ord"]):
         if not w.get("png"):
             continue
-        quad = _doc.word_quad(document, sheet, w, o)
+        ow = o
+        if w.get("box") in box_scale:
+            ow = dict(o)
+            ow["scale"] = box_scale[w["box"]]
+        quad = _doc.word_quad(document, sheet, w, ow)
         if quad is None:
             continue
 

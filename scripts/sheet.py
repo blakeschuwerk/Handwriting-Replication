@@ -80,7 +80,8 @@ class Sheet:
     """Image <-> page mapping for one photographed sheet."""
 
     def __init__(self, M, c1, c2, u_left, u_right, i_first, n_lines,
-                 size, spacing_hint=0.0, margin_x=None, crop=None):
+                 size, spacing_hint=0.0, margin_x=None, crop=None,
+                 from_corners=False):
         self.M = np.asarray(M, float).reshape(3, 3)   # normalised image -> page
         self.Minv = np.linalg.inv(self.M)
         self.c1, self.c2 = float(c1), float(c2)
@@ -99,6 +100,10 @@ class Sheet:
         # guide on the printed line. It has the wrong direction, not the wrong
         # offset. A hand-placed quad sidesteps the gauge entirely.
         self.crop = None if crop is None else [[float(a), float(b)] for a, b in crop]
+        # True when the page was defined by hand from its four corners rather
+        # than inferred from ruling. There is no ink to score such a sheet
+        # against, so the fit checks must not judge it.
+        self.from_corners = bool(from_corners)
 
     # -- bow ---------------------------------------------------------------
 
@@ -281,13 +286,15 @@ class Sheet:
             "spacing_hint": self.spacing_hint,
             "margin_x": self.margin_x,
             "crop": self.crop,
+            "from_corners": self.from_corners,
         }
 
     @staticmethod
     def from_json(d):
         return Sheet(d["M"], d["bow"][0], d["bow"][1], d["u_left"], d["u_right"],
                      d["i_first"], d["n_lines"], d["size"],
-                     d.get("spacing_hint", 0.0), d.get("margin_x"), d.get("crop"))
+                     d.get("spacing_hint", 0.0), d.get("margin_x"), d.get("crop"),
+                     d.get("from_corners", False))
 
     def __repr__(self):
         return (f"Sheet(lines={self.n_lines} from {self.i_first}, "
@@ -326,7 +333,8 @@ def sheet_from_corners(corners, size, rows=30.0, aspect=8.5 / 11.0):
     # rows + 1 line indices, because 0..rows inclusive is what spans the sheet:
     # with n_lines = rows the last index is rows-1 and the bottom edge of the
     # page lands a whole row above the corner the user actually placed.
-    sh = Sheet(M, 0.0, 0.0, 0.0, wu, 0, int(round(hv)) + 1, (W, H))
+    sh = Sheet(M, 0.0, 0.0, 0.0, wu, 0, int(round(hv)) + 1, (W, H),
+               from_corners=True)
     sh.spacing_hint = sh.spacing_px(hv / 2.0, wu / 2.0)
     return sh
 
