@@ -526,6 +526,12 @@
           style="position:absolute;z-index:6;resize:none;border:2px solid #5b7cfa;
                  border-radius:4px;background:rgba(255,255,255,.94);color:#111;
                  padding:4px 6px;font:15px/1.35 system-ui,sans-serif;outline:none"></textarea>
+        <!-- Enter inside the box is a line break, like any text field. This
+             button is what makes the handwriting. -->
+        <button id="p_boxGo" class="hidden"
+          style="position:absolute;z-index:6;padding:5px 12px;border-radius:7px;border:0;
+                 background:#5b7cfa;color:#fff;font:600 13px system-ui,sans-serif;cursor:pointer;
+                 box-shadow:0 2px 8px rgba(0,0,0,.3)">Generate</button>
         <div id="p_palette" class="hidden" style="position:absolute;left:10px;top:10px;z-index:5;
              display:flex;gap:4px;padding:5px;border-radius:10px;
              background:rgba(18,22,28,.88);border:1px solid rgba(255,255,255,.14);
@@ -534,12 +540,6 @@
           <button id="p_toolBox" class="toolbtn" title="Text box — drag on the page to draw one">
             <span style="border:1.5px solid currentColor;border-radius:3px;padding:0 4px;font-weight:700">T</span>
           </button>
-          <span id="p_boxSizeWrap" class="hidden"
-                style="display:flex;align-items:center;gap:6px;padding:0 6px;color:#dfe6f2;font-size:12px">
-            <span style="font-weight:700">Aa</span>
-            <input id="p_boxSize" type="range" min="0.25" max="2" step="0.05" style="width:96px">
-            <span id="p_boxSizeVal" class="muted" style="min-width:26px">1.0</span>
-          </span>
         </div>
       </div>
       <div class="flex" style="margin-top:8px;align-items:center;flex-wrap:wrap;gap:8px">
@@ -1654,16 +1654,23 @@ $('#p_fitAnyway').onclick = () => {
   detInfo('writing with a fit that may be wrong — check the result');
 };
 
+let paperReq = 0;
 async function showPaper() {
   const n = $('#p_paper').value;
   if (!n) { detInfo('no paper photos yet — upload one'); return; }
+  const my = ++paperReq;
   $('#p_img').src = '/img/paper/' + encodeURIComponent(n);
   paperGeom = null; WE.doc = null; WE.sel.clear();
-  WE.boxSel = null; WE.marq = null; WE.boxDraw = null; WE.boxDrag = null;
+  WE.boxSel = null; WE.marq = null; WE.boxDraw = null; WE.boxDrag = null; WE.boxMove = null;
   drawRules(); drawWords();
   fitOverride = false;
   detInfo('finding the ruled lines…');
-  applyGeom(await (await fetch('/api/paper/detect?name=' + encodeURIComponent(n))).json());
+  const g = await (await fetch('/api/paper/detect?name=' + encodeURIComponent(n))).json();
+  // A newer showPaper has started since; this reply describes a photo that is
+  // no longer the one on screen. Two in flight used to race, and the slower
+  // one won.
+  if (my !== paperReq) return;
+  applyGeom(g);
   // The document has to follow the photo. Entering word mode loads it, but a
   // paper picked *after* that leaves the mode on with nothing loaded and
   // nothing retrying -- and with text boxes there is no "Write it" step to
@@ -1695,6 +1702,11 @@ function drawRules() {
   cv.width = img.clientWidth; cv.height = img.clientHeight;
   const ctx = cv.getContext('2d');
   ctx.clearRect(0, 0, cv.width, cv.height);
+  // The palette belongs to the mode, not to whether the rules are drawn --
+  // it used to be toggled at the very end of this function, past this early
+  // return, so with "show the lines" off it never appeared at all.
+  const pal = $('#p_palette');
+  if (pal) pal.classList.toggle('hidden', WE.mode !== 'words');
   if (!paperGeom || !$('#p_showlines').checked) {
     if (typeof drawWordChrome === 'function') drawWordChrome(ctx, pscale());
     return;
@@ -1730,9 +1742,6 @@ function drawRules() {
   ctx.strokeStyle = 'rgba(230,120,255,.85)'; path(paperGeom.right);
 
   if (typeof drawWordChrome === 'function') drawWordChrome(ctx, k);
-  const pal = $('#p_palette');
-  if (pal) pal.classList.toggle('hidden', WE.mode !== 'words');
-  syncBoxSize();
   if (WE.mode === 'words') return;   // no sheet handles while editing words
   if (paperGeom.crop) {
     ctx.strokeStyle = 'rgba(240,160,60,.95)'; ctx.lineWidth = 2;
@@ -1823,7 +1832,7 @@ $('#p_ov').addEventListener('pointerup', async (e) => {
 // Canvas, not DOM nodes. The box editor rebuilds every element on each mouse
 // move; at a few hundred words over a 4032px photo that is unusable.
 const WE = { doc: null, sel: new Set(), sprites: new Map(), mode: 'lines', marq: null,
-  tool: 'pick', boxSel: null, boxDraw: null, boxDrag: null,
+  tool: 'pick', boxSel: null, boxDraw: null, boxDrag: null, boxMove: null,
              drag: null, range: false, anchor: null, dirty: false };
 
 function wordsOn() { return WE.mode === 'words'; }
@@ -1833,6 +1842,11 @@ function setMode(m) {
   $('#p_modeLines').classList.toggle('on', m === 'lines');
   $('#p_modeWords').classList.toggle('on', m === 'words');
   $('#p_wordHelp').classList.toggle('hidden', m !== 'words');
+  // The palette is owned by the mode. drawRules returns before drawing
+  // anything when the image has no layout yet, so toggling it there left the
+  // palette hidden whenever word mode was entered before the photo settled.
+  const pal = $('#p_palette');
+  if (pal) pal.classList.toggle('hidden', m !== 'words');
   $('#p_ov').style.cursor = m === 'words' ? 'default' : 'crosshair';
   if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   if (m === 'words' && !WE.doc && $('#p_paper').value) loadDoc();
@@ -1867,7 +1881,7 @@ async function loadDoc() {
   if (r.error) { detInfo('document: ' + r.error); return; }
   WE.doc = r;
   if (typeof r.text === 'string' && r.text) $('#p_text').value = r.text;
-  selInfo(); drawWords();
+  selInfo(); drawRules(); drawWords();
 }
 
 async function docPost(url, body) {
@@ -1976,13 +1990,44 @@ function boxAt(px, py) {
   return null;
 }
 
+// Two kinds of handle, per Blake: a circle on each corner resizes the *box*
+// (the handwriting keeps its size and rewraps), and the green square on the
+// middle of the bottom edge scales the *handwriting* -- drag it down for
+// bigger, up for smaller.
 function boxHandle(b, px, py, k) {
-  let best = -1, bd = 14 / k;
-  (b.quad || []).forEach((c, i) => {
+  const q = b.quad; if (!q) return null;
+  const gx = (q[2][0] + q[3][0]) / 2, gy = (q[2][1] + q[3][1]) / 2;
+  if (Math.hypot(gx - px, gy - py) < 10 / k) return { kind: 'scale' };
+  let best = -1, bd = 12 / k;
+  q.forEach((c, i) => {
     const d = Math.hypot(c[0] - px, c[1] - py);
     if (d < bd) { bd = d; best = i; }
   });
-  return best;
+  return best >= 0 ? { kind: 'corner', i: best } : null;
+}
+
+// Live geometry while dragging. Every drag event asks the server to re-lay the
+// box out (no generation, so it is quick) and the reply carries the new quad
+// and word positions. Requests are serialised and only the newest pending one
+// is sent, so replies can never arrive out of order and the box never lags
+// behind by more than one round trip. Consecutive moves are merged so no
+// distance is lost while a request is in flight.
+let liveBusy = false, livePending = null;
+function boxLive(body) {
+  if (livePending && livePending.op === 'move' && body.op === 'move') {
+    body = Object.assign({}, body, { px_from: livePending.px_from });
+  }
+  livePending = body;
+  if (liveBusy) return;
+  liveBusy = true;
+  (async () => {
+    while (livePending) {
+      const b = livePending; livePending = null;
+      await docPost('/api/doc/box', b);
+      drawRules(); scheduleWords();
+    }
+    liveBusy = false;
+  })();
 }
 
 async function boxPost(body) {
@@ -2003,21 +2048,23 @@ async function dropEmptyBox(id) {
 }
 
 function drawBoxes(ctx, k) {
-  for (const b of boxes()) {
-    const q = b.quad; if (!q) continue;
-    const on = WE.boxSel === b.id;
+  // Generated handwriting stands on its own. The box, its corner circles and
+  // the green scale square appear only while the group is selected.
+  const b = WE.boxSel ? boxById(WE.boxSel) : null;
+  if (b && b.quad) {
+    const q = b.quad;
     ctx.beginPath();
     q.forEach((p, n) => { const x = p[0]*k, y = p[1]*k; n ? ctx.lineTo(x,y) : ctx.moveTo(x,y); });
     ctx.closePath();
-    ctx.strokeStyle = on ? 'rgba(90,150,255,.95)' : 'rgba(90,150,255,.45)';
-    ctx.lineWidth = on ? 2 : 1;
-    ctx.setLineDash(on ? [] : [6, 5]); ctx.stroke(); ctx.setLineDash([]);
-    if (!on) continue;
+    ctx.strokeStyle = 'rgba(90,150,255,.95)'; ctx.lineWidth = 1.5; ctx.stroke();
     q.forEach(p => {
       ctx.beginPath(); ctx.arc(p[0]*k, p[1]*k, 5, 0, 7);
       ctx.fillStyle = '#fff'; ctx.fill();
       ctx.lineWidth = 2; ctx.strokeStyle = '#5b7cfa'; ctx.stroke();
     });
+    const gx = (q[2][0] + q[3][0]) / 2 * k, gy = (q[2][1] + q[3][1]) / 2 * k;
+    ctx.fillStyle = '#34c759'; ctx.fillRect(gx - 5, gy - 5, 10, 10);
+    ctx.lineWidth = 1.5; ctx.strokeStyle = '#fff'; ctx.strokeRect(gx - 5, gy - 5, 10, 10);
   }
   if (WE.boxDraw) {
     const d = WE.boxDraw;
@@ -2032,47 +2079,59 @@ function drawBoxes(ctx, k) {
 // Typing happens in a textarea floated over the box; the handwriting is
 // generated when you commit, not on every keystroke -- each word is a model
 // call, so per-keystroke generation would be unusable.
-let boxTyping = null;
+let boxTyping = null, boxCommitting = false;
 
 function startBoxTyping(id) {
   const b = boxById(id); if (!b || !b.quad) return;
-  const ta = $('#p_boxInput'), k = pscale();
+  const ta = $('#p_boxInput'), go = $('#p_boxGo'), k = pscale();
   const xs = b.quad.map(c => c[0]*k), ys = b.quad.map(c => c[1]*k);
-  ta.style.left = Math.min(...xs) + 'px';
-  ta.style.top = Math.min(...ys) + 'px';
-  ta.style.width = Math.max(60, Math.max(...xs) - Math.min(...xs)) + 'px';
-  ta.style.height = Math.max(28, Math.max(...ys) - Math.min(...ys)) + 'px';
-  ta.value = b.text || '';
-  ta.classList.remove('hidden');
+  const L = Math.min(...xs), T = Math.min(...ys);
+  const W = Math.max(60, Math.max(...xs) - L), H = Math.max(28, Math.max(...ys) - T);
+  ta.style.left = L + 'px'; ta.style.top = T + 'px';
+  ta.style.width = W + 'px'; ta.style.height = H + 'px';
+  go.style.left = L + 'px'; go.style.top = (T + H + 6) + 'px';
+  ta.value = '';
+  ta.classList.remove('hidden'); go.classList.remove('hidden');
   boxTyping = id;
   WE.boxSel = id;
-  ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+  ta.focus();
   drawRules();
 }
 
-async function commitBoxTyping() {
-  if (!boxTyping) return;
-  const id = boxTyping, ta = $('#p_boxInput');
-  const text = ta.value;
-  boxTyping = null;
-  ta.classList.add('hidden'); ta.value = '';
-  const b = boxById(id);
-  if (!text.trim()) { await dropEmptyBox(id); return; }
-  if (b && (b.text || '') === text) { drawRules(); return; }
-  detInfo('writing the box…');
-  const r = await docPost('/api/doc/boxtext', { id, text });
-  detInfo(r && r.error ? r.error : `${(r.words||[]).length} words on the page`);
-  drawRules(); scheduleWords();
+function hideBoxChrome() {
+  $('#p_boxInput').classList.add('hidden'); $('#p_boxInput').value = '';
+  $('#p_boxGo').classList.add('hidden');
 }
 
-// The size of a box's handwriting, in line heights. Shown only while a box is
-// selected, because it belongs to that box and not to the page.
-function syncBoxSize() {
-  const b = WE.boxSel ? boxById(WE.boxSel) : null;
-  $('#p_boxSizeWrap').classList.toggle('hidden', !b);
-  if (!b) return;
-  $('#p_boxSize').value = b.size || 1;
-  $('#p_boxSizeVal').textContent = (+(b.size || 1)).toFixed(2);
+// Generate: the typed text and the box go away and the handwriting is left
+// standing on its own, deselected. Click it to get the box back.
+async function commitBoxTyping() {
+  if (!boxTyping || boxCommitting) return;
+  boxCommitting = true;
+  const id = boxTyping, text = $('#p_boxInput').value;
+  boxTyping = null; hideBoxChrome();
+  try {
+    if (!text.trim()) { await dropEmptyBox(id); return; }
+    detInfo('writing…');
+    const r = await docPost('/api/doc/boxtext', { id, text });
+    const n = r ? (r.words || []).filter(w => w.box === id).length : 0;
+    const over = r ? (r.words || []).filter(w => w.box === id && w.overflow).length : 0;
+    detInfo(r && r.error ? r.error
+          : `wrote ${n} words` + (over ? ` · ${over} did not fit in the box` : ''));
+  } finally {
+    boxCommitting = false;
+    WE.boxSel = null;
+    drawRules(); scheduleWords();
+  }
+}
+
+// Escape while typing throws the box away -- there is nothing generated yet
+// to keep, and an abandoned empty box is exactly the clutter to avoid.
+async function cancelBoxTyping() {
+  if (!boxTyping) return;
+  const id = boxTyping; boxTyping = null; hideBoxChrome();
+  await docPost('/api/doc/box', { op: 'delete', id });
+  WE.boxSel = null; drawRules(); scheduleWords();
 }
 
 function setTool(t) {
@@ -2157,39 +2216,49 @@ $('#p_ov').addEventListener('pointerdown', (e) => {
   // Take the keyboard first, whatever mode we are in. pointerdown calls
   // preventDefault below, which suppresses the browser's own focus handling.
   $('#p_preview').focus();
-  if (!wordsOn() || !WE.doc) return;
+  if (!wordsOn()) return;
   const cv = $('#p_ov'), r = cv.getBoundingClientRect(), k = pscale();
   const px = (e.clientX - r.left) / k, py = (e.clientY - r.top) / k;
   // Clicking the page commits whatever box you were typing in. Relying on blur
   // alone loses the text if the element is torn down by a redraw first.
   if (boxTyping) { commitBoxTyping(); }
+  // Drawing a box needs no document: creating one returns the whole document.
+  // Gating this on WE.doc made the T tool silently do nothing for the first
+  // seconds after switching photos, while the document was still loading.
   if (WE.tool === 'box') {
     WE.boxDraw = { x0: px, y0: py, x1: px, y1: py };
     cv.setPointerCapture(e.pointerId); e.preventDefault(); return;
   }
-  // A selected box's own handles win over anything underneath them.
+  if (!WE.doc) return;
+  // A selected group's handles win over anything underneath them.
   if (WE.boxSel) {
     const b = boxById(WE.boxSel);
-    const h = b ? boxHandle(b, px, py, pscale()) : -1;
-    if (h >= 0) {
-      WE.boxDrag = { id: b.id, corner: h, opp: b.quad[(h + 2) % 4].slice() };
+    const h = b ? boxHandle(b, px, py, k) : null;
+    if (h && h.kind === 'corner') {
+      WE.boxDrag = { id: b.id, kind: 'corner', opp: b.quad[(h.i + 2) % 4].slice() };
+      cv.setPointerCapture(e.pointerId); e.preventDefault(); return;
+    }
+    if (h && h.kind === 'scale') {
+      const ys = b.quad.map(c => c[1]);
+      WE.boxDrag = { id: b.id, kind: 'scale', y0: py, size0: +(b.size || 1),
+                     h0: Math.max(20, Math.max(...ys) - Math.min(...ys)) };
       cv.setPointerCapture(e.pointerId); e.preventDefault(); return;
     }
   }
   const hit = hitWord(px, py);
-  const overBox = hit ? null : boxAt(px, py);
-  if (overBox && (e.detail > 1 || WE.boxSel === overBox.id)) {
-    startBoxTyping(overBox.id);
-    cv.setPointerCapture(e.pointerId); e.preventDefault(); return;
-  }
-  if (overBox) {
+  // Handwriting that came from a box is one group. Pressing any of it, or the
+  // paper inside its box, selects the whole group and starts moving it.
+  const group = (hit && hit.box) ? boxById(hit.box) : (hit ? null : boxAt(px, py));
+  if (group) {
     const prev = WE.boxSel;
-    WE.boxSel = overBox.id;
-    if (prev && prev !== overBox.id) dropEmptyBox(prev);
-    WE.sel.clear(); selInfo(); drawRules(); scheduleWords();
+    WE.boxSel = group.id;
+    if (prev && prev !== group.id) dropEmptyBox(prev);
+    WE.sel.clear();
+    WE.boxMove = { id: group.id, from: [px, py], moved: false };
+    selInfo(); drawRules(); scheduleWords();
     cv.setPointerCapture(e.pointerId); e.preventDefault(); return;
   }
-  if (WE.boxSel && !hit) { const prev = WE.boxSel; WE.boxSel = null; dropEmptyBox(prev); }
+  if (WE.boxSel) { const prev = WE.boxSel; WE.boxSel = null; dropEmptyBox(prev); }
   const idx = hit ? WE.doc.words.indexOf(hit) : docIndexAt(px, py);
 
   if (hit && e.shiftKey && WE.anchor != null) {
@@ -2228,15 +2297,23 @@ $('#p_ov').addEventListener('pointermove', (e) => {
     WE.boxDraw.x1 = px; WE.boxDraw.y1 = py; drawRules(); return;
   }
   if (WE.boxDrag) {
-    WE.boxDrag.x = px; WE.boxDrag.y = py;
-    const b = boxById(WE.boxDrag.id);
-    if (b) {                       // live preview; the server has the last word
-      const q = b.quad.map(c => c.slice());
-      q[WE.boxDrag.corner] = [px, py];
-      const o = WE.boxDrag.opp, c = WE.boxDrag.corner;
-      q[(c + 1) % 4] = (c % 2 === 0) ? [o[0], py] : [px, o[1]];
-      q[(c + 3) % 4] = (c % 2 === 0) ? [px, o[1]] : [o[0], py];
-      b.quad = q; drawRules();
+    const g = WE.boxDrag;
+    if (g.kind === 'corner') {
+      boxLive({ op: 'update', id: g.id, px: [[px, py], g.opp] });
+    } else {
+      // Down for bigger, up for smaller; dragging by the box's own height
+      // doubles or halves the handwriting.
+      const size = Math.min(4, Math.max(0.15, g.size0 * (1 + (py - g.y0) / g.h0)));
+      boxLive({ op: 'update', id: g.id, size });
+    }
+    return;
+  }
+  if (WE.boxMove) {
+    const m = WE.boxMove;
+    if (Math.abs(px - m.from[0]) + Math.abs(py - m.from[1]) > 2) m.moved = true;
+    if (m.moved) {
+      boxLive({ op: 'move', id: m.id, px_from: m.from, px_to: [px, py] });
+      m.from = [px, py];
     }
     return;
   }
@@ -2272,13 +2349,8 @@ $('#p_ov').addEventListener('pointerup', async (e) => {
     } else { drawRules(); }
     return;
   }
-  if (WE.boxDrag) {
-    const g = WE.boxDrag; WE.boxDrag = null;
-    if (g.x !== undefined) {
-      await boxPost({ op: 'update', id: g.id, px: [[g.x, g.y], g.opp] });
-    } else { drawRules(); }
-    return;
-  }
+  if (WE.boxDrag) { WE.boxDrag = null; drawRules(); return; }   // live updates already landed
+  if (WE.boxMove) { WE.boxMove = null; drawRules(); return; }
   if (WE.marq) {
     const wasClick = !WE.marq.moved;
     WE.marq = null;
@@ -2324,7 +2396,7 @@ document.addEventListener('keydown', async (e) => {
   // Esc hands the keyboard back to the page. Clicking outside the image does
   // the same thing by simply blurring, so both routes are one behaviour --
   // neither disturbs the selection.
-  if (e.key === 'Escape') { $('#p_preview').blur(); drawRules(); return; }
+  if (e.key === 'Escape') { WE.boxSel = null; $('#p_preview').blur(); drawRules(); return; }
 
   if (!wordsOn() || !WE.doc) return;
   const step = e.shiftKey ? 12 : 3;
@@ -2347,6 +2419,13 @@ document.addEventListener('keydown', async (e) => {
   if (e.key === 'Enter') {
     if (WE.sel.size) await edit('linebreak', { delta: e.shiftKey ? -1 : 1 });
     return;
+  }
+  // A selected group goes as a whole. To change its text you delete it and
+  // draw a new one -- Blake's choice over re-editing in place.
+  if (WE.boxSel && !boxTyping && (e.key === 'Delete' || e.key === 'Backspace')) {
+    const id = WE.boxSel; WE.boxSel = null;
+    await docPost('/api/doc/box', { op: 'delete', id });
+    detInfo('removed'); drawRules(); scheduleWords(); return;
   }
   if (!WE.sel.size) return;
   if (e.key === 'Delete' || e.key === 'Backspace') { await edit('delete'); WE.sel.clear(); selInfo(); drawRules(); return; }
@@ -2417,22 +2496,17 @@ $('#p_clear').onclick = async () => {
 };
 if ($('#p_free')) $('#p_free').onclick = () => setFreeShape(!freeShape);
 if ($('#p_page')) $('#p_page').onclick = () => setPageCorners(!pageCorners);
-$('#p_boxInput').addEventListener('blur', commitBoxTyping);
+// Clicking away with text typed generates it (same as the button); with
+// nothing typed the box is dropped.
+$('#p_boxInput').addEventListener('blur', () => { if (boxTyping) commitBoxTyping(); });
 $('#p_boxInput').addEventListener('keydown', (e) => {
   e.stopPropagation();                       // the page's editor must not see these
-  if (e.key === 'Escape' || (e.key === 'Enter' && (e.metaKey || e.ctrlKey))) {
-    e.preventDefault(); $('#p_boxInput').blur();
-  }
+  if (e.key === 'Escape') { e.preventDefault(); cancelBoxTyping(); }
+  else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); commitBoxTyping(); }
+  // plain Enter is a line break, as in any text field
 });
-$('#p_boxSize').oninput = () => {
-  $('#p_boxSizeVal').textContent = (+$('#p_boxSize').value).toFixed(2);
-  const b = WE.boxSel ? boxById(WE.boxSel) : null;
-  if (b) b.size = +$('#p_boxSize').value;
-};
-$('#p_boxSize').onchange = async () => {
-  if (!WE.boxSel) return;
-  await boxPost({ op: 'update', id: WE.boxSel, size: +$('#p_boxSize').value });
-};
+$('#p_boxGo').addEventListener('mousedown', (e) => e.preventDefault());   // keep the caret
+$('#p_boxGo').addEventListener('click', () => commitBoxTyping());
 $('#p_toolPick').onclick = () => setTool('pick');
 $('#p_toolBox').onclick  = () => setTool(WE.tool === 'box' ? 'pick' : 'box');
 $('#p_seedNew').onclick = () => { $('#p_seed').value = Math.floor(Math.random() * 100000); };

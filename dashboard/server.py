@@ -1367,7 +1367,12 @@ def _harden_visible_breaks(document, ids):
 def _rebuild_text(document):
     """Reconstruct the source text from the words, including their structure."""
     out = []
-    for k, w in enumerate(sorted(document["words"], key=lambda d: d["ord"])):
+    # Flowing words only. Words that belong to a text box are not part of this
+    # text -- folding them in here pushed every box's words into the page's
+    # Text panel after each edit, as if they had been typed there.
+    flowing = [w for w in sorted(document["words"], key=lambda d: d["ord"])
+               if not w.get("box")]
+    for k, w in enumerate(flowing):
         if k == 0:
             out.append("\t" * int(w.get("tabs", 0)))
         elif w.get("nl"):
@@ -1492,12 +1497,29 @@ async def doc_box(payload: dict):
              # fill-in blank. A box drawn round a blank should write at the size
              # of that blank; capped at the page scale so a tall box does not
              # produce giant text.
+             # Floored: a box drawn as a thin sliver along a blank otherwise
+             # gets size 0 and invisible handwriting, and thin boxes along
+             # blanks are the normal case on a worksheet.
              "size": float(payload.get("size")
-                           or min(float((document.get("opts") or {}).get("scale") or 1.0),
-                                  abs(float(payload["v1"]) - float(payload["v0"])))),
+                           or max(0.3, min(float((document.get("opts") or {}).get("scale") or 1.0),
+                                           abs(float(payload["v1"]) - float(payload["v0"]))))),
              "text": ""}
         document["boxes"].append(b)
         bid = b["id"]
+    elif op == "move":
+        # Dragging the group. The delta is taken in page space between where
+        # the pointer was and where it is, so the box slides along the paper
+        # and keeps its exact size -- a pixel delta would shrink or grow it
+        # under perspective.
+        (fx, fy), (tx, ty) = payload["px_from"], payload["px_to"]
+        uf = sheet.uv(float(fx), float(fy))
+        ut = sheet.uv(float(tx), float(ty))
+        du = float(ut[0][0]) - float(uf[0][0])
+        dv = float(ut[1][0]) - float(uf[1][0])
+        for b in document["boxes"]:
+            if b["id"] == bid:
+                b["u0"] += du; b["u1"] += du
+                b["v0"] += dv; b["v1"] += dv
     elif op == "delete":
         document["boxes"] = [b for b in document["boxes"] if b["id"] != bid]
         document["words"] = [w for w in document["words"] if w.get("box") != bid]
