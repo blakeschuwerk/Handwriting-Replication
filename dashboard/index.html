@@ -1652,10 +1652,16 @@ async function showPaper() {
   if (!n) { detInfo('no paper photos yet — upload one'); return; }
   $('#p_img').src = '/img/paper/' + encodeURIComponent(n);
   paperGeom = null; WE.doc = null; WE.sel.clear();
+  WE.boxSel = null; WE.marq = null; WE.boxDraw = null; WE.boxDrag = null;
   drawRules(); drawWords();
   fitOverride = false;
   detInfo('finding the ruled lines…');
   applyGeom(await (await fetch('/api/paper/detect?name=' + encodeURIComponent(n))).json());
+  // The document has to follow the photo. Entering word mode loads it, but a
+  // paper picked *after* that leaves the mode on with nothing loaded and
+  // nothing retrying -- and with text boxes there is no "Write it" step to
+  // recover, so the boxes simply never appear.
+  if (WE.mode === 'words') await loadDoc();
 }
 
 async function adjust(edit) {
@@ -1822,7 +1828,7 @@ function setMode(m) {
   $('#p_wordHelp').classList.toggle('hidden', m !== 'words');
   $('#p_ov').style.cursor = m === 'words' ? 'default' : 'crosshair';
   if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
-  if (m === 'words' && !WE.doc) loadDoc();
+  if (m === 'words' && !WE.doc && $('#p_paper').value) loadDoc();
   drawRules(); drawWords();
 }
 $('#p_modeLines').onclick = () => setMode('lines');
