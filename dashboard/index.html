@@ -244,6 +244,13 @@
 
   /* review sidebar: every suspect box on this page, as a picture */
   #edSide { width: 300px; flex: 0 0 300px; border-left: 1px solid var(--line); display: flex; flex-direction: column; background: var(--panel); }
+  /* There was no generic rule for this, only the three ID-scoped ones below,
+     so every element added later that relied on class="hidden" simply never
+     hid: the box-typing textarea sat as a white slab over the toolbar, and the
+     "ruled lines don't look right" banner showed on pages that were perfectly
+     fine. Tests that asserted on classList rather than on computed style could
+     not see it. */
+  .hidden { display: none !important; }
   #edSide.hidden { display: none; }
   #edSideHead { padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 12px; display: flex; align-items: center; gap: 8px; }
   #edSideHead b { color: var(--warn); }
