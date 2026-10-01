@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shlex
+import threading
 import uuid
 import signal
 import subprocess
@@ -1036,12 +1037,50 @@ def _remember_sheet(name, sheet):
         pass
 
 
+# One lock per photo. Detecting a 24-megapixel sheet takes about 30 seconds,
+# and every route into the document goes through this state -- so opening a
+# page fired three of them at once (the document load, the geometry, and
+# whatever the user clicked) and each did the whole job again. Measured on
+# IMG_0155 that turned a 30-second wait into 100, during which the editor
+# looked simply dead: you could draw a box and nothing would appear.
+_STATE_LOCKS = {}
+_STATE_LOCKS_GUARD = threading.Lock()
+
+
+def _state_lock(name):
+    with _STATE_LOCKS_GUARD:
+        return _STATE_LOCKS.setdefault(name, threading.Lock())
+
+
 def _paper_state(name, rebuild=False):
     path = _paper_path(name)
     mt = path.stat().st_mtime
     st = _PAPER.get(name)
-    if st is None or st["mtime"] != mt or rebuild:
+    if st is not None and st["mtime"] == mt and not rebuild:
+        return st
+    with _state_lock(name):
+        # Another request may have finished the work while we waited.
+        st = _PAPER.get(name)
+        if st is not None and st["mtime"] == mt and not rebuild:
+            return st
+        return _build_paper_state(name, path, mt, rebuild)
+
+
+def _build_paper_state(name, path, mt, rebuild):
         img = _paper.load_photo(str(path))
+
+        # A sheet the user placed by hand is the answer already. Detecting the
+        # ruling first and then throwing the result away cost 29 of those 30
+        # seconds on a worksheet that has no usable ruling in the first place.
+        saved = None if rebuild else _saved_sheet(name)
+        if saved is not None and getattr(saved, "from_corners", False):
+            st = {"sheet": saved, "obs": None,
+                  "flat": _paper._flat_response(img), "mtime": mt,
+                  "grown": None, "undetected": False, "manual": True}
+            _PAPER.clear()
+            _PAPER[name] = st
+            return st
+
         try:
             sheet, obs, info = _paper.detect_sheet(img)
             undetected = False
@@ -1060,7 +1099,6 @@ def _paper_state(name, rebuild=False):
         # the only geometry a worksheet has, and re-detecting on every restart
         # threw them away and put the garbage grid back. "reset" still forces a
         # fresh detection.
-        saved = _saved_sheet(name)
         if saved is not None:
             sheet = saved
             if getattr(sheet, "from_corners", False):
@@ -1075,7 +1113,7 @@ def _paper_state(name, rebuild=False):
               "manual": manual}
         _PAPER.clear()        # only ever one page open at a time
         _PAPER[name] = st
-    return st
+        return st
 
 
 @app.get("/api/paper/detect")

@@ -2090,9 +2090,15 @@ function startBoxTyping(id) {
   const W = Math.max(60, Math.max(...xs) - L), H = Math.max(28, Math.max(...ys) - T);
   ta.style.left = L + 'px'; ta.style.top = T + 'px';
   ta.style.width = W + 'px'; ta.style.height = H + 'px';
-  go.style.left = L + 'px'; go.style.top = (T + H + 6) + 'px';
   ta.value = '';
   ta.classList.remove('hidden'); go.classList.remove('hidden');
+  // Measure after it is laid out. Placing the button from the height we asked
+  // for put it on top of the last line of text, because a box on a tilted page
+  // renders taller than the height passed in.
+  const bottom = T + ta.offsetHeight + 6;
+  const fits = bottom + go.offsetHeight < $('#p_preview').clientHeight;
+  go.style.left = L + 'px';
+  go.style.top = (fits ? bottom : Math.max(0, T - go.offsetHeight - 6)) + 'px';
   boxTyping = id;
   WE.boxSel = id;
   ta.focus();
