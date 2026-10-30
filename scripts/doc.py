@@ -235,7 +235,37 @@ def humanize_params(h):
     }
 
 
-BASELINE_FRAC = 0.907   # where the baseline sits inside a rendered word box
+BASELINE_FRAC = 0.907   # fallback, for words whose image has not been measured
+
+
+def ink_baseline(path):
+    """Where this word's own baseline sits, as a fraction of its image height.
+
+    One constant for every word left most of them floating: the model puts the
+    bottom of the letters anywhere from row 18 to row 31 of its 32, so "sepa"
+    and "cumplen" hovered a third of a line above a blank that "pases" sat on.
+    The baseline is where the letter bodies stop: a sharp fall in the row-by-row
+    ink profile after which little ink is left. The sharpest fall alone is not
+    enough -- round letters carry more ink at their top and bottom than their
+    middle, so "mejor" and "trabajo" fell hardest halfway down the letters and
+    sat six rows too low. Requiring the ink to have mostly run out picks the
+    real foot; descenders are thin, so the fall below them is never chosen.
+    """
+    import numpy as _np
+    from PIL import Image as _Image
+    g = _np.asarray(_Image.open(path).convert("L"), _np.float32)
+    h = g.shape[0]
+    prof = _np.clip((200.0 - g) / 150.0, 0, 1).sum(axis=1)
+    if prof.max() <= 0:
+        return BASELINE_FRAC
+    smooth = _np.convolve(prof, [1, 2, 3, 2, 1], "same") / 9.0
+    d = _np.diff(smooth)
+    deepest = d.min()
+    falls = [r for r in range(1, len(d) - 1)
+             if d[r] < d[r - 1] and d[r] <= d[r + 1] and d[r] <= 0.6 * deepest]
+    ends = [r for r in falls if smooth[r + 1] <= 0.65 * smooth.max()]
+    base = (ends[0] if ends else int(_np.argmin(d))) + 1
+    return float(min(0.97, max(0.45, base / h)))
 
 
 def word_quad(doc, sheet, w, o=None):
@@ -276,8 +306,9 @@ def word_quad(doc, sheet, w, o=None):
              + float(w.get("slant", 0.0)))
     lean = math.tan(math.radians(slant)) * s   # how far the top edge leads the foot
 
-    v_top = line + dv - BASELINE_FRAC * s
-    v_bot = line + dv + (1.0 - BASELINE_FRAC) * s
+    bf = float(w.get("base") or BASELINE_FRAC)
+    v_top = line + dv - bf * s
+    v_bot = line + dv + (1.0 - bf) * s
     corners = ((v_top, u0 + lean), (v_top, u0 + wu + lean),
                (v_bot, u0 + wu), (v_bot, u0))
     return [list(sheet.point(v, u)) for v, u in corners]
@@ -651,6 +682,10 @@ def ensure_words(doc, cache_dir, style=None, ckpt=None, device="mps", log=None):
         key = _cache_key(w, style, ckpt)
         path = os.path.join(cache_dir, key + ".png")
         if os.path.exists(path):
+            # A reroll or retext swaps the image under the same record, and the
+            # new image has its own baseline, so measure whenever it changes.
+            if w.get("png") != path or not w.get("base"):
+                w["base"] = ink_baseline(path)
             w["png"] = path
             if not w.get("aspect"):
                 iw, ih = _Image.open(path).size
@@ -691,6 +726,7 @@ def ensure_words(doc, cache_dir, style=None, ckpt=None, device="mps", log=None):
         w["png"] = dest
         iw, ih = _Image.open(dest).size
         w["aspect"] = iw / ih
+        w["base"] = ink_baseline(dest)
         w["gen"] = {"style": style, "ckpt": ckpt, "seed": word_seed(w)}
     for junk in _glob(os.path.join(tmp, "*")):
         os.remove(junk)
