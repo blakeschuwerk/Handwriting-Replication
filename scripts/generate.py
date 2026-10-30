@@ -68,6 +68,115 @@ def default_style_refs(n=3):
     return cands[:n]
 
 
+# The model's alphabet is plain ASCII, so Spanish/French text used to come out
+# with its accented letters silently deleted ("más" -> "ms", "año" -> "ao").
+# Instead each such letter is generated as its base letter and the mark is drawn
+# on afterwards. The generator lays every character in its own char_width-wide
+# slot, so the letter's column is known exactly and the mark lands over it.
+_COMBINING = {"́": "acute", "̀": "grave", "̃": "tilde",
+              "̈": "diaeresis", "̂": "circumflex"}
+_INVERTED = {"¿": "?", "¡": "!"}
+
+
+def split_marks(word, alphabet):
+    """(base word the model can draw, [(char index, mark kind), ...])."""
+    import unicodedata
+    base, marks = [], []
+    for ch in word:
+        if ch in _INVERTED:
+            # Not part of the base word: drawn as its own glyph, turned over,
+            # and spliced in. Rotating it inside the word mangled its
+            # neighbour, since the model lets strokes cross slot boundaries.
+            marks.append((len(base), "invert:" + _INVERTED[ch]))
+            continue
+        if ch in alphabet:
+            base.append(ch)
+            continue
+        parts = unicodedata.normalize("NFD", ch)
+        if parts[0] in alphabet and all(p in _COMBINING for p in parts[1:]):
+            for p in parts[1:]:
+                marks.append((len(base), _COMBINING[p]))
+            base.append(parts[0])
+    return "".join(base), marks
+
+
+def draw_marks(img, marks, char_width, seed=0):
+    """Draw diacritics onto a generated word image (uint8, white ground)."""
+    if not marks:
+        return img
+    from PIL import ImageDraw
+    img = img.copy()
+    h, w = img.shape
+    ink_px = img[img < 128]
+    ink = int(np.percentile(ink_px, 30)) if ink_px.size else 40
+    rng = np.random.default_rng(seed)
+    S = 4                                    # draw supersampled, then shrink
+    for idx, kind in marks:
+        if kind.startswith("invert"):
+            continue
+        x0, x1 = idx * char_width, min(w, (idx + 1) * char_width)
+        col = img[:, x0:x1] < 128
+        rows = np.where(col.any(axis=1))[0]
+        cols = np.where(col.any(axis=0))[0]
+        top = int(rows[0]) if rows.size else h // 3
+        cx = x0 + (float(cols.mean()) if cols.size else char_width / 2)
+        cx += rng.uniform(-1, 1)
+        y = max(3.0, top - 3.0)              # baseline of the mark
+        layer = Image.new("L", (w * S, h * S), 0)
+        d = ImageDraw.Draw(layer)
+        lw = 2 * S
+        if kind == "acute":
+            d.line([((cx - 1.5) * S, y * S), ((cx + 2.5) * S, (y - 5) * S)], fill=255, width=lw)
+        elif kind == "grave":
+            d.line([((cx + 1.5) * S, y * S), ((cx - 2.5) * S, (y - 5) * S)], fill=255, width=lw)
+        elif kind == "tilde":
+            pts = [((cx - 4 + t) * S, (y - 2 - 1.6 * math.sin(t / 8 * 2 * math.pi)) * S)
+                   for t in np.linspace(0, 8, 12)]
+            d.line(pts, fill=255, width=lw, joint="curve")
+        elif kind == "diaeresis":
+            for dx in (-2.5, 2.5):
+                d.ellipse([((cx + dx) - 1.1) * S, (y - 3.2) * S, ((cx + dx) + 1.1) * S, (y - 1) * S], fill=255)
+        elif kind == "circumflex":
+            d.line([((cx - 3) * S, (y - 1) * S), (cx * S, (y - 5) * S), ((cx + 3) * S, (y - 1) * S)],
+                   fill=255, width=lw, joint="curve")
+        a = np.asarray(layer.resize((w, h), Image.LANCZOS), np.float32) / 255.0
+        img = np.minimum(img, (255 * (1 - a) + ink * a)).astype(np.uint8)
+    return img
+
+
+def inverted_glyph(word_img, glyph):
+    """Pen-drawn ¿ or ¡ sized to the word's own letter band.
+
+    Asking the model for a lone "?" and turning it over came out as an
+    unreadable squiggle, so these two are drawn as strokes instead.
+    """
+    from PIL import ImageDraw
+    h = word_img.shape[0]
+    ink_mask = word_img < 128
+    prof = ink_mask.sum(axis=1)
+    body = np.where(prof > 0.35 * prof.max())[0] if prof.max() else np.array([h // 3, 2 * h // 3])
+    top, base = float(body[0]), float(body[-1])
+    ink_px = word_img[ink_mask]
+    ink = int(np.percentile(ink_px, 30)) if ink_px.size else 40
+    S, gw = 4, 13
+    layer = Image.new("L", (gw * S, h * S), 0)
+    d = ImageDraw.Draw(layer)
+    cx = 7.5
+    d.ellipse([(cx - 1.2) * S, (top - 1.2) * S, (cx + 1.2) * S, (top + 1.2) * S], fill=255)
+    if glyph == "?":
+        stem_end = (top + base) / 2
+        d.line([(cx * S, (top + 4) * S), (cx * S, stem_end * S)], fill=255, width=2 * S)
+        r = min(4.0, max(2.5, (base - top) / 3.0))
+        cy = stem_end + r - 0.5
+        pts = [((cx + r * math.cos(t)) * S, (cy + r * math.sin(t)) * S)
+               for t in np.linspace(-math.pi / 2, -math.pi / 2 - 1.6 * math.pi, 18)]
+        d.line(pts, fill=255, width=2 * S, joint="curve")
+    else:
+        d.line([(cx * S, (top + 4) * S), ((cx - 0.4) * S, min(h - 2, base + 5) * S)], fill=255, width=2 * S)
+    a = np.asarray(layer.resize((gw, h), Image.LANCZOS), np.float32) / 255.0
+    return (255 * (1 - a) + ink * a).astype(np.uint8)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Generate handwriting-style word images with FW-GAN.")
     p.add_argument("--text", required=True, help="Arbitrary text string; words separated by spaces.")
@@ -205,7 +314,9 @@ def main():
 
     raw_words = args.text.split()
     words = []
+    word_marks = []
     for raw_word in raw_words:
+        raw_word, marks = split_marks(raw_word, alphabet_dict)
         filtered_chars = [c for c in raw_word if c in alphabet_dict]
         dropped = [c for c in raw_word if c not in alphabet_dict]
         if dropped:
@@ -217,6 +328,7 @@ def main():
         if len(word) > max_word_len:
             print(f"WARNING: word '{word}' exceeds max_word_len={max_word_len}, quality may degrade", file=sys.stderr)
         words.append(word)
+        word_marks.append(marks)
 
     if not words:
         print("ERROR: no words survived alphabet filtering.", file=sys.stderr)
@@ -253,6 +365,13 @@ def main():
 
             img = fake[0, 0]
             img = (255 * ((img + 1) / 2)).clamp(0, 255).to(torch.uint8).cpu().numpy()
+            img = draw_marks(img, word_marks[idx], char_width,
+                             seed=seeds[idx % len(seeds)] if seeds else idx)
+            for pos, kind in reversed(word_marks[idx]):
+                if kind.startswith("invert:"):
+                    g = inverted_glyph(img, kind.split(":", 1)[1])
+                    cut = pos * char_width
+                    img = np.concatenate([img[:, :cut], g, img[:, cut:]], axis=1)
 
             img_min, img_max, img_mean = int(img.min()), int(img.max()), float(img.mean())
             if img_max - img_min < 5:
