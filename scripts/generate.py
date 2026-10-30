@@ -76,12 +76,21 @@ def default_style_refs(n=3):
 _COMBINING = {"́": "acute", "̀": "grave", "̃": "tilde",
               "̈": "diaeresis", "̂": "circumflex"}
 _INVERTED = {"¿": "?", "¡": "!"}
+# The model's own full stop and comma come out as a stray letter ("clase." read
+# as "clases"), so a word's trailing ones are drawn as a plain pen dot instead.
+_TRAILING = ".,"
 
 
 def split_marks(word, alphabet):
     """(base word the model can draw, [(char index, mark kind), ...])."""
     import unicodedata
     base, marks = [], []
+    tail = len(word.rstrip(_TRAILING))
+    if tail == 0:
+        tail = len(word)                     # a lone "." is still a word
+    for ch in word[tail:]:
+        marks.append((None, "append:" + ch))
+    word = word[:tail]
     for ch in word:
         if ch in _INVERTED:
             # Not part of the base word: drawn as its own glyph, turned over,
@@ -100,28 +109,163 @@ def split_marks(word, alphabet):
     return "".join(base), marks
 
 
-def draw_marks(img, marks, char_width, seed=0):
+def letter_band(img):
+    """(top, base) rows of the word's letter bodies: x-height top and baseline.
+
+    Taken from the sharpest rise and fall of the row-by-row ink profile, which
+    ignores thin ascenders and descenders. A plain threshold on the profile was
+    thrown by any word with a lot of tall or descending letters.
+    """
+    h = img.shape[0]
+    prof = np.clip((200.0 - img.astype(np.float32)) / 150.0, 0, 1).sum(axis=1)
+    if prof.max() <= 0:
+        return h / 3.0, 2 * h / 3.0
+    sm = np.convolve(prof, [1, 2, 3, 2, 1], "same") / 9.0
+    d = np.diff(sm)
+    # Same rule as doc.ink_baseline: the first hard fall after which the
+    # letter bodies have mostly run out of ink, not merely the hardest fall.
+    falls = [r for r in range(1, len(d) - 1)
+             if d[r] < d[r - 1] and d[r] <= d[r + 1] and d[r] <= 0.6 * d.min()]
+    ends = [r for r in falls if sm[r + 1] <= 0.65 * sm.max()]
+    base = (ends[0] if ends else int(np.argmin(d))) + 1
+    top = int(np.argmax(d[:max(1, base - 3)])) + 1
+    return float(top), float(base)
+
+
+def _drop_dot(img, x0, x1, top):
+    """Erase an i/j's own dot so an accent can take its place.
+
+    Left in, the dot under the accent reads as a diaeresis: "días" came out
+    looking like "dïas".
+    """
+    from scipy import ndimage
+    lab, n = ndimage.label(img < 215)     # faint dots count too
+    for k, sl in enumerate(ndimage.find_objects(lab), 1):
+        ys, xs = sl
+        if (ys.stop <= top + 1 and ys.stop - ys.start <= 7
+                and xs.start >= x0 - 3 and xs.stop <= x1 + 3):
+            img[sl][lab[sl] == k] = 255
+
+
+# First letters the model draws as if they began a sentence when they start a
+# word: m as "M"/"H", n as "h", s as "S", e as "E", a lone a as a hook. Other
+# letters were measured to come out the same with or without the lead space,
+# and leading with it costs a stray mark that has to be cut away again.
+LEAD_LETTERS = "mnsea"
+
+
+def lead_cut(img, char_width):
+    """Column where the throwaway leading space ends and the word begins.
+
+    The model leaves a stray mark in the space's slot, so the cut goes through
+    the emptiest column between that mark and the first letter.
+    """
+    prof = (img < 200).sum(axis=0).astype(np.float32)
+    prof = np.convolve(prof, [1, 1, 1], "same")
+    lo, hi = 4, min(len(prof) - 1, char_width + 8)
+    if hi <= lo:
+        return 0
+    seg = prof[lo:hi + 1]
+    # Rightmost of the emptiest columns: the stray mark sits at the far left.
+    return lo + int(np.flatnonzero(seg == seg.min())[-1])
+
+
+def drop_stray(img, first_letter):
+    """Erase what is left of the stray mark at the word's left edge.
+
+    The space's mark is a single thin stroke, drawn apart from the first
+    letter. It goes only when it is clearly narrower than that letter could be.
+    """
+    from scipy import ndimage
+    mask = img < 215
+    lab, _ = ndimage.label(mask)
+    objs = ndimage.find_objects(lab)
+    if len(objs) < 2:
+        return img
+    k, sl = min(enumerate(objs, 1), key=lambda o: o[1][1].start)
+    ys, xs = sl
+    limit = 4 if first_letter in "se" else 6
+    if xs.start <= 3 and xs.stop - xs.start <= limit and ys.stop - ys.start >= 7:
+        img = img.copy()
+        img[sl][lab[sl] == k] = 255
+    return img
+
+
+def letter_span(G, enc_z, word, idx, device, base_img):
+    """(left, right, centre) columns where the generator drew word[idx].
+
+    The generator does not keep letters in their nominal char_width slots -- a
+    narrow "l" pulls everything after it left -- so an accent placed by slot
+    landed on the "t" of "lástima" and vanished into it. (The model's own
+    recogniser was no help: its alignment is just as slot-bound.) Instead the
+    word is drawn again with the same noise and only that letter swapped; the
+    columns that change are the letter's own.
+    """
+    swap = "l" if word[idx] != "l" else "o"
+    alt = word[:idx] + swap + word[idx + 1:]
+    import torch
+    lbs = torch.LongTensor(_ENCODE(alt)).unsqueeze(0).to(device)
+    other = G(enc_z, lbs, torch.IntTensor([len(alt)]).to(device))[0, 0, :, :base_img.shape[1]]
+    other = (255 * ((other + 1) / 2)).clamp(0, 255).cpu().numpy()
+    diff = np.abs(base_img.astype(np.float32) - other).sum(axis=0)
+    diff = np.convolve(diff, np.ones(5) / 5, "same")
+    if diff.max() <= 0:
+        return None
+    peak = int(np.argmax(diff))
+    lo, hi = peak, peak
+    while lo > 0 and diff[lo - 1] > 0.35 * diff[peak]:
+        lo -= 1
+    while hi < len(diff) - 1 and diff[hi + 1] > 0.35 * diff[peak]:
+        hi += 1
+    xs = np.arange(lo, hi + 1)
+    return lo, hi, float((xs * diff[lo:hi + 1]).sum() / diff[lo:hi + 1].sum())
+
+
+def letter_centre(G, enc_z, word, idx, device, base_img):
+    span = letter_span(G, enc_z, word, idx, device, base_img)
+    return span[2] if span else None
+
+
+_ENCODE = None     # set in main() to the model's label encoder
+
+
+def draw_marks(img, marks, char_width, seed=0, word="", centres=None):
     """Draw diacritics onto a generated word image (uint8, white ground)."""
     if not marks:
         return img
     from PIL import ImageDraw
     img = img.copy()
     h, w = img.shape
+    band_top, _ = letter_band(img)
     ink_px = img[img < 128]
     ink = int(np.percentile(ink_px, 30)) if ink_px.size else 40
     rng = np.random.default_rng(seed)
     S = 4                                    # draw supersampled, then shrink
     for idx, kind in marks:
-        if kind.startswith("invert"):
+        if kind.startswith(("invert", "append")):
             continue
-        x0, x1 = idx * char_width, min(w, (idx + 1) * char_width)
+        if centres and centres.get(idx) is not None:
+            half = char_width * 0.4
+            x0, x1 = max(0, int(centres[idx] - half)), min(w, int(centres[idx] + half) + 1)
+        else:
+            x0, x1 = idx * char_width, min(w, (idx + 1) * char_width)
+        if idx < len(word) and word[idx] in "ij":
+            _drop_dot(img, x0, x1, band_top)
         col = img[:, x0:x1] < 128
         rows = np.where(col.any(axis=1))[0]
         cols = np.where(col.any(axis=0))[0]
         top = int(rows[0]) if rows.size else h // 3
-        cx = x0 + (float(cols.mean()) if cols.size else char_width / 2)
+        if idx < len(word) and word[idx].islower():
+            # A lowercase letter's accent sits on its x-height. The slot's
+            # first ink row is often a neighbour's ascender reaching in -- the
+            # d of "días" -- which put the accent above the image top, gone.
+            top = band_top
+        if centres and centres.get(idx) is not None:
+            cx = float(centres[idx])
+        else:
+            cx = x0 + (float(cols.mean()) if cols.size else char_width / 2)
         cx += rng.uniform(-1, 1)
-        y = max(3.0, top - 3.0)              # baseline of the mark
+        y = max(6.0, top - 2.5)              # baseline of the mark
         layer = Image.new("L", (w * S, h * S), 0)
         d = ImageDraw.Draw(layer)
         lw = 2 * S
@@ -153,9 +297,7 @@ def inverted_glyph(word_img, glyph):
     from PIL import ImageDraw
     h = word_img.shape[0]
     ink_mask = word_img < 128
-    prof = ink_mask.sum(axis=1)
-    body = np.where(prof > 0.35 * prof.max())[0] if prof.max() else np.array([h // 3, 2 * h // 3])
-    top, base = float(body[0]), float(body[-1])
+    top, base = letter_band(word_img)
     ink_px = word_img[ink_mask]
     ink = int(np.percentile(ink_px, 30)) if ink_px.size else 40
     S, gw = 4, 13
@@ -173,6 +315,40 @@ def inverted_glyph(word_img, glyph):
         d.line(pts, fill=255, width=2 * S, joint="curve")
     else:
         d.line([(cx * S, (top + 4) * S), ((cx - 0.4) * S, min(h - 2, base + 5) * S)], fill=255, width=2 * S)
+    a = np.asarray(layer.resize((gw, h), Image.LANCZOS), np.float32) / 255.0
+    return (255 * (1 - a) + ink * a).astype(np.uint8)
+
+
+def trailing_glyph(word_img, glyph, seed=0, last="", char_width=16):
+    """A pen full stop or comma, sitting where the last letter stands.
+
+    The last letter's own foot is the surest baseline for a mark that follows
+    it; the whole-word profile drifts on short words. A letter that descends
+    gives no foot to go by, so those fall back to the word's band.
+    """
+    from PIL import ImageDraw
+    h = word_img.shape[0]
+    _, base = letter_band(word_img)
+    if last and last not in "gjpqy,;":
+        # The model often finishes a word short of its last slot, so look at
+        # the last letter's worth of actual ink rather than the slot.
+        # Faint strokes count: this model draws plenty of ink lighter than 128.
+        inked = np.where((word_img < 175).any(axis=0))[0]
+        right = int(inked[-1]) + 1 if inked.size else word_img.shape[1]
+        foot = word_img[:, max(0, right - char_width):right] < 175
+        rows = np.where(foot.sum(axis=1) >= 1)[0]
+        if rows.size:
+            base = float(rows[-1])
+    ink_px = word_img[word_img < 128]
+    ink = int(np.percentile(ink_px, 30)) if ink_px.size else 40
+    rng = np.random.default_rng(seed)
+    S, gw = 4, 7
+    layer = Image.new("L", (gw * S, h * S), 0)
+    d = ImageDraw.Draw(layer)
+    cx, cy, r = 2.5 + rng.uniform(-0.5, 0.5), base - 1.2, 1.25
+    d.ellipse([(cx - r) * S, (cy - r) * S, (cx + r) * S, (cy + r) * S], fill=255)
+    if glyph == ",":
+        d.line([((cx + 0.6) * S, cy * S), ((cx - 1.2) * S, (cy + 4) * S)], fill=255, width=int(1.8 * S))
     a = np.asarray(layer.resize((gw, h), Image.LANCZOS), np.float32) / 255.0
     return (255 * (1 - a) + ink * a).astype(np.uint8)
 
@@ -310,6 +486,8 @@ def main():
 
     # --- Text -> words, with OOV filtering ---------------------------------
     alphabet_dict = model.label_converter.dict
+    global _ENCODE
+    _ENCODE = model.label_converter.encode
     max_word_len = cfg.training.max_word_len
 
     raw_words = args.text.split()
@@ -345,9 +523,17 @@ def main():
     word_images = []
     with torch.no_grad():
         for idx, word in enumerate(words):
-            enc = model.label_converter.encode(word)  # plain string -> flat index list
+            # A word starting lowercase is drawn with a space in front and the
+            # space cut off afterwards. On its own the model draws a word's
+            # first letter as if it began a sentence -- "me" came out "Mc",
+            # "no" as "ho", "es" as "Es" -- and a leading space is enough to
+            # make it write the letter as it would mid-line.
+            lead = word[0] in LEAD_LETTERS
+            gword = " " + word if lead else word
+            marks = [(i + 1 if (lead and i is not None) else i, k) for i, k in word_marks[idx]]
+            enc = model.label_converter.encode(gword)  # plain string -> flat index list
             word_lbs = torch.LongTensor(enc).unsqueeze(0).to(device)  # (1, L)
-            word_lb_lens = torch.IntTensor([len(word)]).to(device)  # (1,)
+            word_lb_lens = torch.IntTensor([len(gword)]).to(device)  # (1,)
 
             if seeds is not None:
                 # Per word, not once per run: seeding once would make every word's
@@ -359,19 +545,33 @@ def main():
             enc_z = torch.cat([noise, style_mu], dim=1)  # (1, 128)
 
             fake = model.models.G(enc_z, word_lbs, word_lb_lens)  # (1,1,32, L*char_width)
-            fake = fake[:, :, :, : len(word) * char_width]
+            fake = fake[:, :, :, : len(gword) * char_width]
 
             assert torch.isfinite(fake).all(), f"non-finite output for word {word!r}"
 
             img = fake[0, 0]
             img = (255 * ((img + 1) / 2)).clamp(0, 255).to(torch.uint8).cpu().numpy()
-            img = draw_marks(img, word_marks[idx], char_width,
-                             seed=seeds[idx % len(seeds)] if seeds else idx)
+            seed_i = seeds[idx % len(seeds)] if seeds else idx
+            centres = None
+            accented = [i for i, k in marks if not k.startswith(("append", "invert"))]
+            if accented:
+                centres = {i: letter_centre(model.models.G, enc_z, gword, i, device, img)
+                           for i in accented}
+            img = draw_marks(img, marks, char_width, seed=seed_i, word=gword,
+                             centres=centres)
+            if lead:
+                img = drop_stray(img[:, lead_cut(img, char_width):], word[0])
             for pos, kind in reversed(word_marks[idx]):
                 if kind.startswith("invert:"):
                     g = inverted_glyph(img, kind.split(":", 1)[1])
-                    cut = pos * char_width
+                    if pos == 0:
+                        cut = 0
+                    else:
+                        cut = pos * char_width
                     img = np.concatenate([img[:, :cut], g, img[:, cut:]], axis=1)
+            for _, kind in word_marks[idx]:
+                if kind.startswith("append:"):
+                    img = np.concatenate([img, trailing_glyph(img, kind[-1], seed_i, word[-1:], char_width)], axis=1)
 
             img_min, img_max, img_mean = int(img.min()), int(img.max()), float(img.mean())
             if img_max - img_min < 5:
