@@ -2048,7 +2048,7 @@ async function dropEmptyBox(id) {
   return true;
 }
 
-function drawBoxes(ctx, k) {
+function drawTextBoxes(ctx, k) {
   // Generated handwriting stands on its own. The box, its corner circles and
   // the green scale square appear only while the group is selected.
   const b = WE.boxSel ? boxById(WE.boxSel) : null;
@@ -2173,7 +2173,7 @@ function setTool(t) {
 
 function drawWordChrome(ctx, k) {
   if (!WE.doc || !Array.isArray(WE.doc.words) || !wordsOn()) return;
-  drawBoxes(ctx, k);
+  drawTextBoxes(ctx, k);
   if (WE.marq && WE.marq.moved) {
     const m = WE.marq;
     const x = Math.min(m.x0, m.x1) * k, y = Math.min(m.y0, m.y1) * k;
