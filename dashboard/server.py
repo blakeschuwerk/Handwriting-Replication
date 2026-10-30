@@ -962,6 +962,23 @@ def paper_list():
     return {"papers": names, "builtin": BUILTIN_PAPER}
 
 
+def _bake_orientation(path):
+    """Rotate the pixels upright and drop the EXIF rotation flag.
+
+    A phone photo held upright is stored sideways with an orientation tag. The
+    browser honours the tag and shows the page upright, but OpenCV and the
+    renderer read the raw sideways pixels -- so every corner, box and word the
+    user placed on screen landed rotated a quarter turn on the server.
+    """
+    from PIL import Image, ImageOps
+    with Image.open(path) as im:
+        if im.getexif().get(0x0112, 1) == 1:
+            return
+        upright = ImageOps.exif_transpose(im)
+        jpeg = path.suffix.lower() in {".jpg", ".jpeg"}
+        upright.save(path, **({"quality": 95} if jpeg else {}))
+
+
 @app.post("/api/paper/upload")
 async def paper_upload(files: list[UploadFile] = File(...)):
     PAPER.mkdir(parents=True, exist_ok=True)
@@ -981,6 +998,7 @@ async def paper_upload(files: list[UploadFile] = File(...)):
                             "--out", str(jpg)], capture_output=True)
             dest.unlink(missing_ok=True)
             dest = jpg
+        _bake_orientation(dest)
         saved.append(dest.name)
     return {"saved": saved, "rejected": rejected}
 
