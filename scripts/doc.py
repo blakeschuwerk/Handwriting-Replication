@@ -42,7 +42,7 @@ DEFAULTS = {
     "space_em": 0.28,
     "tab_em": 0.6,
     "start_line": 0,
-    "darkness": 0.22,
+    "ink": "pencil",       # pencil | black | blue | red -- see render_page.INKS
     "humanize": 0.35,
 }
 

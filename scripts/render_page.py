@@ -233,6 +233,57 @@ def ink_alpha(im, keep_texture=True):
     return Image.fromarray((alpha * 255.0).astype(np.uint8), mode="L")
 
 
+# What each writing tool leaves on paper, as a fraction of the paper's own
+# brightness per channel (B, G, R order to match OpenCV). None means pencil:
+# the model's own grey, texture and all, which is what the live preview always
+# showed and what read as real. Pens are flatter -- ink pools evenly where
+# graphite skips -- so their strokes run to one colour at the core instead.
+INKS = {
+    "pencil": None,
+    "black":  (0.19, 0.16, 0.16),
+    "blue":   (0.62, 0.30, 0.22),
+    "red":    (0.20, 0.18, 0.78),
+}
+
+
+def ink_layer(im, ink="pencil", size=None):
+    """The one definition of how a word darkens the paper.
+
+    Returns (f, a): f is the ink's colour as a fraction of the paper under it
+    (H x W x 3, BGR), a is how much it covers (H x W). A pixel ends up as
+    paper * (1 - a + a * f). The browser preview gets these as an RGBA sprite
+    blended with multiply, which is the same sum, so the preview and the export
+    cannot drift apart again.
+
+    They did drift: the export used to throw the model's grey away and paint
+    every covered pixel a flat 22% of the paper, so strokes came out twice as
+    dark as the model drew them and lost all their texture.
+
+    `size` is the (w, h) the word will occupy on the photo. The model draws
+    words 32px tall and the photo wants 70-120px, so the grey is upscaled
+    smoothly FIRST and the matte cut from that. Cutting the matte at 32px and
+    stretching it afterwards is what left stair-stepped edges on every stroke.
+    """
+    im = im.convert("L")
+    native = np.asarray(im, dtype=np.float32)
+    bg = max(1.0, float(np.percentile(native, BG_PCT)))
+    if size and tuple(size) != im.size:
+        im = im.resize(tuple(int(v) for v in size), Image.BICUBIC)
+    g = np.asarray(im, dtype=np.float32)
+    a = np.asarray(ink_alpha(im), dtype=np.float32) / 255.0
+    tone = np.clip(g / bg, 0.0, 1.0)          # the model's own shade, 1 = paper
+
+    rgb = INKS.get(ink)
+    if rgb is None:
+        f = np.repeat(tone[..., None], 3, axis=2)
+    else:
+        depth = 1.0 - tone
+        core = float(np.percentile(depth[a > 0.5], 85)) if (a > 0.5).any() else 1.0
+        u = np.clip(depth / max(0.05, core), 0.0, 1.0)[..., None]
+        f = 1.0 - u * (1.0 - np.float32(rgb))
+    return f.astype(np.float32), a
+
+
 def load_word_images(paths, word_height, matte=True):
     """Open each path, convert to grayscale, resize to a common target
     height (preserving aspect ratio). Skips (with a warning) any file that

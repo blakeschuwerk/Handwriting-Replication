@@ -37,13 +37,16 @@ from scipy.signal import find_peaks
 import sheet as _sheet
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from render_page import ink_alpha  # noqa: E402
+from render_page import ink_alpha, ink_layer  # noqa: E402
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GENERATE_PY = os.path.join(PROJECT, "scripts", "generate.py")
 VENV_PYTHON = os.path.join(PROJECT, ".venv", "bin", "python3")
 TEST_PAGE = os.path.join(PROJECT, "assets", "test_page.jpg")
 
+# Softness of a stroke edge on a phone photo, in photo pixels. Measured off the
+# printed text on the worksheet photos, whose edges ramp over ~2px.
+CAMERA_BLUR = 0.8
 BLUE_SIGMA = 51       # flat-field blur: >> rule thickness, << page size
 N_SLABS = 16          # vertical slabs used to follow rules through perspective
 
@@ -756,11 +759,11 @@ def sheet_json(sheet, response=None, n_points=24, obs=None):
     return out
 
 
-def compose_doc(bgr, sheet, document, scale=None, darkness=None):
+def compose_doc(bgr, sheet, document, scale=None, ink=None):
     """Composite an editable document onto the photo.
 
-    Same blend as compose(), but driven by word records: each word carries its
-    own image, its own page-space position and its own deterministic variation,
+    Driven by word records rather than placements: each word carries its own
+    image, its own page-space position and its own deterministic variation,
     so the result depends on the document rather than on iteration order.
     """
     import doc as _doc
@@ -768,8 +771,7 @@ def compose_doc(bgr, sheet, document, scale=None, darkness=None):
     o.update(document.get("opts") or {})
     if scale is not None:
         o["scale"] = scale
-    if darkness is not None:
-        o["darkness"] = darkness
+    ink = ink or o.get("ink") or "pencil"
     hp = _doc.humanize_params(o["humanize"])
     # A word inside a text box is drawn at that box's size, not the page's.
     # Laying out at one scale and drawing at another is how words ended up
@@ -806,16 +808,19 @@ def compose_doc(bgr, sheet, document, scale=None, darkness=None):
         if cx1 <= cx0 or cy1 <= cy0:
             continue
 
-        alpha = ink_alpha(Image.open(w["png"]))
-        # Pre-scale to roughly the destination size first. warpPerspective only
-        # offers linear sampling, which aliases badly when it has to shrink a
-        # sprite several times over; LANCZOS down to the right size first keeps
-        # the faint strokes that carry the texture.
+        # Resample to the destination size first, in both directions.
+        # warpPerspective only offers linear sampling, which aliases when it
+        # shrinks a sprite several times over and leaves stair-steps when it
+        # enlarges one -- and the 32px model output is enlarged 2-4x on a phone
+        # photo. ink_layer upscales the grey and cuts the matte after, so the
+        # stroke edges come out smooth.
         eh = max(np.hypot(*(dst[3] - dst[0])), np.hypot(*(dst[2] - dst[1])))
         ew = max(np.hypot(*(dst[1] - dst[0])), np.hypot(*(dst[2] - dst[3])))
-        tw = max(2, min(alpha.width, int(round(ew))))
-        th = max(2, min(alpha.height, int(round(eh))))
-        a = np.asarray(alpha.resize((tw, th), Image.LANCZOS), np.float32) / 255.0
+        tw = max(2, int(round(ew)))
+        th = max(2, int(round(eh)))
+        f, a = ink_layer(Image.open(w["png"]), ink, (tw, th))
+        # premultiplied: how much each channel of the paper gets taken away
+        a = a[..., None] * (1.0 - f)
 
         # warpPerspective samples at pixel centres, so the sprite's full extent
         # runs from -0.5 to tw-0.5, not 0 to tw. Using 0..tw squeezes the image
@@ -828,8 +833,10 @@ def compose_doc(bgr, sheet, document, scale=None, darkness=None):
                                 flags=cv2.INTER_LINEAR,
                                 borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
 
-        dk = o["darkness"] ** max(0.05, w.get("dark", 1.0))
-        out[cy0:cy1, cx0:cx1] *= (1.0 - a[..., None] * (1.0 - dk))
+        # The photo's own blur: a camera never resolves a stroke edge to one
+        # pixel, so a perfectly crisp one reads as printed on, not written.
+        a = cv2.GaussianBlur(a, (0, 0), CAMERA_BLUR)
+        out[cy0:cy1, cx0:cx1] *= (1.0 - a)
         drawn += 1
 
     if skipped:

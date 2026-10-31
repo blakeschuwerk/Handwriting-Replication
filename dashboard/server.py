@@ -1721,18 +1721,19 @@ async def doc_edit(payload: dict):
 
 
 @app.get("/img/word/{fname}")
-def img_word(fname: str):
+def img_word(fname: str, ink: str = "pencil"):
     """A word as a real alpha image, for the browser to composite live.
 
-    First endpoint in this project to serve an alpha channel -- everything else
-    is opaque. ink_alpha() already computes exactly this mask; it was previously
-    consumed in-process and thrown away.
+    Built by the same ink_layer() the export uses; the page blends it with
+    multiply, which gives paper * (1 - a + a * f) exactly as compose_doc does.
     """
     from PIL import Image
+    import numpy as np
     src = _safe_under(WORDS, fname)
-    im = Image.open(src)
+    f, a = _render_page.ink_layer(Image.open(src), ink)
+    rgba = np.dstack([f[..., ::-1] * 255.0, a * 255.0])
     buf = io.BytesIO()
-    Image.merge("LA", (im.convert("L"), _render_page.ink_alpha(im))).save(buf, "PNG")
+    Image.fromarray(np.clip(rgba + 0.5, 0, 255).astype(np.uint8), "RGBA").save(buf, "PNG")
     return Response(buf.getvalue(), media_type="image/png",
                     headers={"Cache-Control": "public, max-age=31536000, immutable"})
 

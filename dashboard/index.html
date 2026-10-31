@@ -579,7 +579,9 @@
       <div class="row">
         <label class="fld"><span>Start on line<b class="rv" id="p_start_v">0</b></span><input type="range" id="p_start" value="0" min="0" max="40" step="1" data-rv="p_start_v"></label>
         <label class="fld"><span>Size (&times; line spacing)<b class="rv" id="p_scale_v">1.05</b></span><input type="range" id="p_scale" value="1.05" step="0.05" min="0.4" max="2.5" data-rv="p_scale_v"></label>
-        <label class="fld"><span>Darkness<b class="rv" id="p_dark_v">0.22</b></span><input type="range" id="p_dark" value="0.22" step="0.02" min="0" max="1" data-rv="p_dark_v"></label>
+        <label class="fld"><span>Ink</span><select id="p_ink">
+          <option value="pencil">Pencil</option><option value="black">Black pen</option>
+          <option value="blue">Blue pen</option><option value="red">Red pen</option></select></label>
         <label class="fld"><span>Seed</span><span class="flex" style="gap:6px"><input type="number" class="nospin" id="p_seed" value="0" style="flex:1"><button type="button" class="minibtn" id="p_seedNew" title="try a different one">shuffle</button></span></label>
       </div>
       <div class="row">
@@ -1858,12 +1860,14 @@ $('#p_modeWords').onclick = () => setMode('words');
 
 function sprite(png) {
   if (!png) return null;
-  let im = WE.sprites.get(png);
+  const ink = (WE.doc && WE.doc.opts && WE.doc.opts.ink) || 'pencil';
+  const key = png + '|' + ink;
+  let im = WE.sprites.get(key);
   if (!im) {
     im = new Image();
     im.onload = () => scheduleWords();
-    im.src = '/img/word/' + encodeURIComponent(png);
-    WE.sprites.set(png, im);
+    im.src = '/img/word/' + encodeURIComponent(png) + '?ink=' + ink;
+    WE.sprites.set(key, im);
   }
   return im;
 }
@@ -1882,6 +1886,7 @@ async function loadDoc() {
   if (r.error) { detInfo('document: ' + r.error); return; }
   WE.doc = r;
   if (typeof r.text === 'string' && r.text) $('#p_text').value = r.text;
+  syncInk();
   selInfo(); drawRules(); drawWords();
 }
 
@@ -1900,6 +1905,7 @@ async function docPost(url, body) {
     // what is actually on the page. Letting them drift is what made "Write it"
     // and "Edit words" show different documents.
     if (typeof d.text === 'string' && d.text !== $('#p_text').value) $('#p_text').value = d.text;
+    syncInk();
     selInfo(); drawWords();
   }
   return d;
@@ -2505,13 +2511,23 @@ $('#paperBtn').onclick = async () => {
     text: $('#p_text').value,
     style: { crop: $('#p_style').value || null, ckpt: $('#p_ckpt').value || 'pretrained' },
     opts: { start_line: +$('#p_start').value, scale: +$('#p_scale').value,
-            darkness: +$('#p_dark').value },
+            ink: $('#p_ink').value },
   });
   $('#paperBtn').disabled = false;
   if (!r) { detInfo('could not write the page'); return; }
   detInfo(`${r.words.length} words on the page`
     + (r.overflow ? ` · ${r.overflow} past the last line` : ''));
   setMode('words');
+};
+
+// The ink belongs to the page, not to "Write it": switching it recolours the
+// words already there without regenerating any of them.
+function syncInk() {
+  const ink = WE.doc && WE.doc.opts && WE.doc.opts.ink;
+  if (ink) $('#p_ink').value = ink;
+}
+$('#p_ink').onchange = () => {
+  if (WE.doc) edit('opts', { opts: { ink: $('#p_ink').value } });
 };
 
 $('#p_export').onclick = async () => {
