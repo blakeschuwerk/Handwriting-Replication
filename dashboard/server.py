@@ -210,11 +210,79 @@ def status():
 
 
 # ---- upload ----------------------------------------------------------------
+PDF_DPI = 300
+# Phone-photo PDFs often declare a huge page (a 3024px photo at 72 DPI is a
+# 42-inch page), which at 300 DPI would be a ~100 MP render. Cap the long edge
+# near a phone camera's own resolution -- past that there's no detail to gain.
+PDF_MAX_EDGE = 4200
+
+
+def _pdf_to_pages(data, stem):
+    """Render every page of a PDF into raw_scans/ as <stem>_pNN.jpg.
+
+    Scanned coursework usually arrives as a PDF, and the old workaround was
+    screenshotting each page out of a PDF viewer -- which throws away most of
+    the scan's resolution and adds viewer chrome around the page. Rendering
+    straight from the PDF at 300 DPI keeps the pen strokes as sharp as the scan
+    allows, which matters because Vision and the crops both work off these pixels.
+
+    Uses Quartz (CoreGraphics), which the Vision engine already depends on, so
+    PDF support needs nothing new installed. Page /Rotate flags are honoured via
+    CGPDFPageGetDrawingTransform, so a page that displays upright in Preview
+    lands upright here too.
+    """
+    import Quartz
+    from PIL import Image
+
+    provider = Quartz.CGDataProviderCreateWithCFData(data)
+    doc = Quartz.CGPDFDocumentCreateWithProvider(provider)
+    if doc is None or Quartz.CGPDFDocumentGetNumberOfPages(doc) == 0:
+        raise ValueError("not a readable PDF")
+    n = Quartz.CGPDFDocumentGetNumberOfPages(doc)
+    width = max(2, len(str(n)))
+    rgb = Quartz.CGColorSpaceCreateDeviceRGB()
+    saved = []
+    for i in range(1, n + 1):
+        page = Quartz.CGPDFDocumentGetPage(doc, i)
+        box = Quartz.CGPDFPageGetBoxRect(page, Quartz.kCGPDFCropBox)
+        # A quarter-turned page swaps its output width and height.
+        rot = Quartz.CGPDFPageGetRotationAngle(page) % 180
+        pw, ph = box.size.width, box.size.height
+        if rot:
+            pw, ph = ph, pw
+        scale = min(PDF_DPI / 72.0, PDF_MAX_EDGE / max(pw, ph))
+        w, h = int(round(pw * scale)), int(round(ph * scale))
+        ctx = Quartz.CGBitmapContextCreate(
+            None, w, h, 8, w * 4, rgb, Quartz.kCGImageAlphaNoneSkipLast)
+        # White first: PDFs have no background, and a transparent page would
+        # come out black.
+        Quartz.CGContextSetRGBFillColor(ctx, 1, 1, 1, 1)
+        Quartz.CGContextFillRect(ctx, Quartz.CGRectMake(0, 0, w, h))
+        Quartz.CGContextScaleCTM(ctx, scale, scale)
+        Quartz.CGContextConcatCTM(ctx, Quartz.CGPDFPageGetDrawingTransform(
+            page, Quartz.kCGPDFCropBox, Quartz.CGRectMake(0, 0, pw, ph), 0, True))
+        Quartz.CGContextDrawPDFPage(ctx, page)
+        img = Quartz.CGBitmapContextCreateImage(ctx)
+        buf = Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(img))
+        stride = Quartz.CGImageGetBytesPerRow(img)
+        im = Image.frombuffer("RGBX", (w, h), bytes(buf), "raw", "RGBX", stride, 1)
+        dest = RAW / f"{stem}_p{i:0{width}d}.jpg"
+        im.convert("RGB").save(dest, quality=92)
+        saved.append(dest.name)
+    return saved
+
+
 @app.post("/api/upload")
 async def upload(files: list[UploadFile] = File(...)):
     saved, rejected = [], []
     for f in files:
         ext = Path(f.filename).suffix.lower()
+        if ext == ".pdf":
+            try:
+                saved += _pdf_to_pages(await f.read(), Path(f.filename).stem)
+            except ValueError:
+                rejected.append(f.filename)
+            continue
         if ext not in IMG_EXTS:
             rejected.append(f.filename)
             continue

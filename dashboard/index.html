@@ -320,9 +320,9 @@
   <section class="tab active" id="tab-upload">
     <div class="card">
       <h2>Drop in your handwriting scans</h2>
-      <p class="sub">Photos or scans of pages you've handwritten. PNG / JPG / HEIC. They're copied into <code>raw_scans/</code>.</p>
-      <div id="drop">📄 &nbsp;Drag images here, or click to choose files</div>
-      <input type="file" id="fileInput" accept="image/*,.heic" multiple hidden />
+      <p class="sub">Photos or scans of pages you've handwritten. PNG / JPG / HEIC, or a PDF &mdash; each PDF page becomes its own image. They're copied into <code>raw_scans/</code>.</p>
+      <div id="drop">📄 &nbsp;Drag images or PDFs here, or click to choose files</div>
+      <input type="file" id="fileInput" accept="image/*,.heic,.pdf,application/pdf" multiple hidden />
       <div class="thumbs" id="rawThumbs"></div>
     </div>
     <div class="card">
@@ -741,9 +741,9 @@ async function uploadFiles(files) {
   for (const f of files) fd.append('files', f);
   drop.textContent = 'Uploading…';
   const r = await (await fetch('/api/upload', { method: 'POST', body: fd })).json();
-  drop.textContent = '📄  Drag images here, or click to choose files';
+  drop.textContent = '📄  Drag images or PDFs here, or click to choose files';
   await refreshStatus(); loadRawThumbs();
-  if (r.rejected.length) alert('Skipped non-images: ' + r.rejected.join(', '));
+  if (r.rejected.length) alert('Skipped (not an image or readable PDF): ' + r.rejected.join(', '));
 }
 
 async function loadRawThumbs() {
