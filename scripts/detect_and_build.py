@@ -30,6 +30,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import boxstore  # noqa: E402
+import page_reader  # noqa: E402
+import transcript_align  # noqa: E402
 from segment import (  # noqa: E402
     load_image_any, downscale_if_needed, detect_page_region, normalize_background,
 )
@@ -58,7 +60,7 @@ def processed_page(path, rotations):
     return img, gray
 
 
-def detect_page(path, root, rotations, min_conf, min_words):
+def detect_page(path, root, rotations, min_conf, min_words, reader=False):
     color, gray = processed_page(path, rotations)
     if color is None:
         return None
@@ -66,7 +68,8 @@ def detect_page(path, root, rotations, min_conf, min_words):
 
     pages = os.path.join(root, PAGES_DIRNAME)
     os.makedirs(pages, exist_ok=True)
-    cv2.imwrite(os.path.join(pages, boxstore.page_key(path) + ".png"), gray)
+    key = boxstore.page_key(path)
+    cv2.imwrite(os.path.join(pages, key + ".png"), gray)
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
         tmp = tf.name
@@ -77,20 +80,41 @@ def detect_page(path, root, rotations, min_conf, min_words):
         os.unlink(tmp)
     obs = dominant_column(obs, VW)
 
+    # Each line's boxable words: (vision word tuple, cleaned token).
+    lines = [[(wt, clean_word(wt[0])) for wt in o["words"] if clean_word(wt[0])] for o in obs]
+
+    # With a page reader, Vision's own confidence stops deciding which lines
+    # survive: a low-confidence line is usually a fine line Vision misread, and
+    # the reader's transcript now says what it really is. Lines the transcript
+    # doesn't contain (bleed-through, the facing page) drop out below instead.
+    labels = None
+    if reader:
+        raw = page_reader.read(root, color, os.path.join(pages, key + ".chandra.json"))
+        labels = transcript_align.align_page(
+            [[tok for _, tok in ln] for ln in lines], transcript_align.clean_transcript(raw))
+
     detected = []
-    for li, o in enumerate(obs, start=1):
-        if o["conf"] < min_conf or len(o["words"]) < min_words:
+    for li, (o, ln) in enumerate(zip(obs, lines), start=1):
+        if labels is None and (o["conf"] < min_conf or len(o["words"]) < min_words):
             continue
-        for wi, (word, x, y, w, h) in enumerate(o["words"], start=1):
-            token = clean_word(word)
-            if not token:
-                continue
+        for wi, ((word, x, y, w, h), token) in enumerate(ln, start=1):
+            review, conf = None, o["conf"]
+            if labels is not None:
+                lab = labels[li - 1][wi - 1]
+                if lab["flag"] == "not_in_transcript":
+                    continue
+                token, review, conf = lab["text"], lab["flag"], lab["sim"]
             pad = max(2, int(0.06 * h))
-            detected.append(boxstore.make_box(
+            box = boxstore.make_box(
                 max(0, x - pad), max(0, y - pad),
                 min(W - max(0, x - pad), w + 2 * pad),
                 min(H - max(0, y - pad), h + 2 * pad),
-                text=token, conf=o["conf"], line=li, word=wi, source="vision"))
+                text=token, conf=conf, line=li, word=wi, source="vision")
+            if labels is not None:
+                # Present (even as None) only on reader-labelled boxes: it is
+                # how wordcheck.box_flag tells them from Vision-read ones.
+                box["review"] = review
+            detected.append(box)
 
     doc = boxstore.load(root, path) or boxstore.empty_doc(
         path, W, H, int((rotations or {}).get(os.path.basename(path), 0)))
@@ -137,6 +161,9 @@ def main():
     ap.add_argument("--min-words", type=int, default=2)
     ap.add_argument("--min-h", type=int, default=16)
     ap.add_argument("--min-w", type=int, default=10)
+    ap.add_argument("--reader", choices=["vision", "chandra"], default="vision",
+                    help="Who reads the words: Vision alone, or Chandra OCR 2 "
+                         "(~80s/page, far more accurate; see page_reader.py).")
     args = ap.parse_args()
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -153,10 +180,19 @@ def main():
         print(f"No images in {raw}")
         sys.exit(0)
 
+    reader = args.reader == "chandra"
+    if reader and not page_reader.available(root):
+        print(f"[ERROR] Chandra model not found at {page_reader.MODEL_DIRNAME} "
+              f"-- see scripts/page_reader.py for setup.")
+        sys.exit(1)
+
     if args.phase in ("detect", "all"):
         tot = {}
-        for p in files:
-            r = detect_page(p, root, rotations, args.min_conf, args.min_words)
+        for i, p in enumerate(files, start=1):
+            if reader:
+                print(f"  reading page {i}/{len(files)} with Chandra "
+                      f"(~80s each, cached after the first time)...", flush=True)
+            r = detect_page(p, root, rotations, args.min_conf, args.min_words, reader)
             if not r:
                 continue
             stats, n = r

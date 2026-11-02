@@ -97,10 +97,7 @@ def main():
         inks = page_ink(root, boxstore.page_key(fn), boxes)
         for b in boxes:
             text = (b.get("text") or "").strip()
-            if b.get("accepted"):
-                flag = None
-            else:
-                flag, _s, _src = wordcheck.judge(text, lex, inks.get(b["id"]))
+            flag, _s, _src = wordcheck.box_flag(b, lex, inks.get(b["id"]))
             info[b["id"]] = (text, bool(b.get("accepted")), flag)
 
     accepted, review = [], []

@@ -26,6 +26,8 @@ checkpoints/*.pth
 models/weights/*.pth
 models/weights/.cache/
 models/FW_GAN/data/*.hdf5
+# local OCR models (PaddleOCR-VL, Chandra): 2-5GB each, downloaded by hand
+models/ocr/
 
 # --- third-party model code: has its own repo + MIT license, don't vendor it ---
 models/FW_GAN/

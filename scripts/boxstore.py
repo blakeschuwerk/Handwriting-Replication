@@ -139,6 +139,12 @@ def merge_detection(doc, detected, iou_thresh=0.5):
             old.update({"x": det["x"], "y": det["y"], "w": det["w"], "h": det["h"],
                         "text": det["text"], "conf": det["conf"],
                         "line": det["line"], "word": det["word"]})
+            # A Vision-only re-detect must drop the reader's verdict along
+            # with its text, or a stale flag would ride on a new label.
+            if "review" in det:
+                old["review"] = det["review"]
+            else:
+                old.pop("review", None)
             out.append(old)
             stats["refreshed"] += 1
         else:

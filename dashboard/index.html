@@ -327,7 +327,8 @@
     </div>
     <div class="card">
       <h2>Detect &amp; read the words</h2>
-      <p class="sub">Uses Apple's Vision engine (built into macOS — nothing to download) to find every word <i>and</i> transcribe it in one pass. Takes about a second per page. Boxes you've hand-edited are preserved.</p>
+      <p class="sub">Apple's Vision engine (built into macOS) finds every word box. On its own it also reads them, about a second per page — but only ~63% of words right on these notebook pages. Boxes you've hand-edited are preserved.</p>
+      <label style="font-size:13px;display:block;margin:0 0 10px"><input type="checkbox" id="segChandra"> <b>Read with Chandra</b> <span class="muted">— a local OCR model reads the page and its words are put onto Vision's boxes. ~97% of words right, ~80s per page the first time (cached after). Needs <code>models/ocr/chandra-ocr-2-oQ8</code>.</span></label>
       <div class="flex">
         <button class="btn" id="segBtn">Run detection</button>
         <span class="muted">then review in <b>Edit Boxes</b> → <b>Label</b></span>
@@ -752,7 +753,7 @@ async function loadRawThumbs() {
     `<div class="thumb"><img src="/img/raw/${encodeURIComponent(n)}?t=${Date.now()}"><div>${n}</div></div>`).join('');
 }
 
-$('#segBtn').onclick = () => runStream('/api/detect', $('#segLog'), () => {
+$('#segBtn').onclick = () => runStream('/api/detect' + ($('#segChandra').checked ? '?reader=chandra' : ''), $('#segLog'), () => {
   runStream('/api/curate', $('#segLog'), () => { refreshSelects(); loadPages(); });
 });
 
@@ -768,6 +769,9 @@ const WHY = {
   too_short:  'too short to be a word',
   empty:      'no label',
   blank:      'box looks empty — check it',
+  split_word: 'one word cut into two boxes — merge them',
+  weak_match: "reading doesn't match the box well — check it",
+  number_mismatch: 'Vision and Chandra read different numbers',
 };
 
 async function loadPages() {

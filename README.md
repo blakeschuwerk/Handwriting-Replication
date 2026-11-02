@@ -8,8 +8,10 @@ no cloud API calls, no third-party handwriting data.
 ## Pipeline overview
 
 ```
-raw_scans/ (your photos)
+raw_scans/ (your photos, or PDFs -- each page is rendered to an image)
       │  scripts/vision_segment.py  — Apple Vision: detect + OCR every word
+      │  scripts/page_reader.py     — optional: Chandra OCR 2 reads the page,
+      │  scripts/transcript_align.py   and its words replace Vision's on the boxes
       ▼
 boxes/*.json                         — one file per page, stable UUID per box
       │  dashboard's Edit Boxes tab  — you review, fix, or accept flagged boxes
@@ -28,6 +30,24 @@ scripts/generate.py                  — arbitrary text → generated word image
       ▼
 scripts/render_page.py               — words laid out onto a page, boxes matted out
 ```
+
+### Reading words more accurately (optional)
+
+Vision finds word boxes well but reads this handwriting poorly: 63% of words
+right against a hand-checked answer key for three notebook pages. Ticking
+**Read with Chandra** on the Upload & Detect tab has a local OCR model read
+each page and puts its words onto Vision's boxes: 99% of box labels right on
+the same pages, about 5% of boxes left flagged for review. It needs ~5GB of
+disk and memory and takes ~80s per page the first time (cached after):
+
+```bash
+.venv/bin/pip install mlx-vlm==0.7.11
+HF_HUB_DISABLE_XET=1 .venv/bin/hf download mlx-community/chandra-ocr-2-oQ8 --local-dir models/ocr/chandra-ocr-2-oQ8
+```
+
+Chandra normalises spelling ("parrellell" becomes "parallel"), so a label can
+be the correctly spelled form of a word written misspelled. See
+`scripts/page_reader.py` for the full comparison, including PaddleOCR-VL.
 
 Everything above is driven from one dashboard: `dashboard/server.py` (FastAPI)
 + `dashboard/index.html` (single-page UI, no build step). Launch it with

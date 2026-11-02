@@ -462,10 +462,7 @@ def _page_review(scan_name, key, doc):
     chars = set()
     for b in _boxstore.active(doc):
         text = (b.get("text") or "").strip()
-        if b.get("accepted"):
-            flag = None
-        else:
-            flag, _s, _src = _wordcheck.judge(text, lex, _ink(gray, b))
+        flag, _s, _src = _wordcheck.box_flag(b, lex, _ink(gray, b))
         if flag:
             flagged += 1
         elif text and b["id"] in cropped:
@@ -634,12 +631,10 @@ def get_boxes(key: str):
             lex, gray = _lex(), _page_gray(key)
             for b in boxes:
                 ink = _ink(gray, b)
-                if b.get("accepted"):
-                    # Human said this really is what the page says (these notes
-                    # contain genuine misspellings). Stop second-guessing it.
-                    flag = sug = src = None
-                else:
-                    flag, sug, src = _wordcheck.judge(b.get("text", ""), lex, ink)
+                # An accepted box is one a human said really is what the page
+                # says (these notes contain genuine misspellings); box_flag
+                # stops second-guessing it.
+                flag, sug, src = _wordcheck.box_flag(b, lex, ink)
                 b["ink"] = ink
                 b["flag"] = flag
                 b["suggest"] = sug
@@ -730,11 +725,13 @@ def _invalidate():
 
 
 @app.get("/api/detect")
-def detect(only: str = ""):
+def detect(only: str = "", reader: str = "vision"):
     _invalidate()
     args = [str(SCRIPTS / "detect_and_build.py"), "all"]
     if only:
         args += ["--only", only]
+    if reader == "chandra":
+        args += ["--reader", "chandra"]
     return StreamingResponse(stream_script(args), media_type="text/event-stream")
 
 

@@ -276,6 +276,31 @@ def judge(text, lex, ink=None):
     return "misspelled", repl, src
 
 
+def box_flag(box, lex, ink=None):
+    """(flag, suggestion, source) for a stored box -- the one rule every
+    caller (editor, page picker, build_labels) applies.
+
+    A human's say-so wins: an accepted or hand-edited box is not second-guessed
+    by the transcript aligner. Otherwise an aligner objection (split word,
+    weak match, disputed number -- see transcript_align.py) comes first,
+    because the spelling check can't see it: a label can be a perfectly good
+    word and still belong to half a box.
+    """
+    if box.get("accepted"):
+        return None, None, None
+    if "review" in box and not box.get("edited"):
+        # Labelled by a page reader. Its words are real words, so the spelling
+        # check only adds noise -- on a test page it flagged "held", "boxes"
+        # and "Robotics", all right. It exists to catch Vision's garbles
+        # ("Manasement"), which this box no longer carries.
+        if box["review"]:
+            return box["review"], None, None
+        if ink is not None and ink < BLANK_INK:
+            return "blank", None, None
+        return None, None, None
+    return judge(box.get("text", ""), lex, ink)
+
+
 if __name__ == "__main__":
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     lex = Lexicon.build(root)
